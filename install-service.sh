@@ -10,11 +10,14 @@ SERVICE_TEMPLATE="/opt/victronenergy/service-templates/dbus-smartshunt-jk-bms"
 echo "=== dbus-smartshunt-jk-bms Installation ==="
 echo ""
 
-if [ ! -d "/data/apps" ]; then
-    echo "Error: /data/apps directory not found."
-    echo "This script is designed for Venus OS."
+if [ ! -d "/data" ]; then
+    echo "Error: /data not found. This script expects Victron Venus OS."
     exit 1
 fi
+mkdir -p /data/apps || {
+    echo "Error: could not create /data/apps."
+    exit 1
+}
 
 echo "Installing to: $INSTALL_DIR"
 

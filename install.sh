@@ -19,10 +19,16 @@ echo "SmartShunt + JK BMS — installer"
 echo "========================================"
 echo ""
 
-if [ ! -d "/data/apps" ]; then
-    echo "Error: /data/apps not found. This script must run on Venus OS."
+# Venus OS keeps user-writable data under /data (Cerbo, Venus GX, etc.).
+# /data/apps is only a convention for third-party software—it is not always present until created.
+if [ ! -d "/data" ]; then
+    echo "Error: /data not found. This installer expects Victron Venus OS."
     exit 1
 fi
+mkdir -p /data/apps || {
+    echo "Error: could not create /data/apps (check permissions / storage)."
+    exit 1
+}
 
 echo "Step 1: Checking for git..."
 if ! command -v git >/dev/null 2>&1; then

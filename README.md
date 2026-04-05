@@ -50,6 +50,8 @@ If you used the old service name and install path:
 - Exactly one Victron SmartShunt and a JK BMS visible on D-Bus (`com.victronenergy.battery.*`)
 - SSH access to your Venus device
 
+The installer expects a writable **`/data`** tree (normal on Venus). It creates **`/data/apps`** if it does not exist; Venus does not ship that folder by default, and older docs assumed it was already there after another app had created it.
+
 ### Recommended: One-Line Remote Install
 
 ```bash
@@ -251,6 +253,10 @@ tail -f /data/apps/dbus-smartshunt-jk-bms/service/log/current | tai64nlocal
 - `/Dc/0/Voltage` follows the JK BMS; current, SoC, and history follow the SmartShunt
 
 ## Troubleshooting
+
+### Installer says `/data` not found
+
+Run the install **on the Cerbo** (e.g. `ssh root@<cerbo-ip>` then paste the `curl … | bash` command). If you run `install.sh` on your laptop, `/data` will not exist and the script will correctly refuse to continue.
 
 ### Service won't start
 
