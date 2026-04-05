@@ -129,7 +129,10 @@ if not DEVICE_NAME:
     DEVICE_NAME = "SmartShunts"
 
 # Battery Specifications
-# Capacity is always read from SmartShunt configuration registers (no config needed)
+# Capacity is always read from the single SmartShunt configuration registers (no config needed)
+
+# Optional full D-Bus service name for JK BMS (pack voltage source). Empty = auto-detect by ProductName.
+JK_BMS_DBUS_SERVICE = config["DEFAULT"].get("JK_BMS_DBUS_SERVICE", "").strip()
 
 # Device Naming
 DEVICE_NAME = config["DEFAULT"].get("DEVICE_NAME", "").strip()

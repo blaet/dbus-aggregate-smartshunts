@@ -1,45 +1,40 @@
 # dbus-aggregate-smartshunts
 
-A Victron Venus OS service that aggregates multiple SmartShunts into a single virtual SmartShunt monitor.
+A Victron Venus OS service that exposes a **single virtual SmartShunt** on D-Bus using **one** Victron SmartShunt for current, SoC, alarms, history, and other monitor paths, while taking **pack voltage** from a **JK BMS** service (typical `dbus-serialbattery` / similar driver on Venus).
 
-> **Note:** This project is derived from [dbus-aggregate-batteries](https://github.com/Dr-Gigavolt/dbus-aggregate-batteries) by Anton Labanc PhD and adapted for SmartShunt aggregation.
+> **Note:** This project is derived from [dbus-aggregate-batteries](https://github.com/Dr-Gigavolt/dbus-aggregate-batteries) by Anton Labanc PhD and adapted for SmartShunt-centric monitoring.
 
 ## Purpose
 
-When you have multiple batteries in parallel, each with their own SmartShunt, the Cerbo GX shows them separately. This service combines them into a single virtual SmartShunt, providing unified monitoring of your complete battery bank.
+Use one SmartShunt for accurate coulomb counting and monitoring, but show **cell-side pack voltage** from the JK BMS on the same virtual battery the rest of the system sees. The Cerbo then gets one consolidated battery device instead of juggling separate shunt and BMS monitors for the same bank.
+
+**Requirements:**
+- Exactly **one** Victron SmartShunt on D-Bus (`ProductId` `0xA389`)
+- Exactly **one** JK BMS battery service, auto-detected by `ProductName` containing `JK` (case-insensitive), or set explicitly in `config.ini` (`JK_BMS_DBUS_SERVICE`)
 
 **Key Benefits:**
-- 🎯 **Combined monitoring** - See your entire battery bank as one device
-- 📊 **Accurate SoC** - Capacity-weighted state of charge across all batteries
-- ⚡ **Reactive updates** - Instant response when any SmartShunt reports changes
-- 🔧 **Zero configuration** - Auto-detects SmartShunts and calculates capacity
-- 🛡️ **Smart protection** - Intelligent voltage and temperature reporting prioritizes battery safety
-- 🔍 **Full transparency** - Exposes which physical SmartShunts are being aggregated
-- 📊 **Complete history** - Aggregates charge cycles, energy throughput, and all history data
+- 🎯 **One virtual monitor** - Single battery entry for GUI and VRM-style consumers
+- 📊 **SoC and Ah from the SmartShunt** - Same source as VictronConnect tuning
+- 🔋 **Voltage from the BMS** - Pack voltage as reported by the JK path
+- ⚡ **Reactive updates** - Refreshes when the shunt or JK voltage changes
+- 🔧 **Capacity from the shunt** - Read from VE.Direct configuration (register `0x1000`)
 
 ## Features
 
-- ✅ **Auto-discovers all SmartShunts** on the system
-- ✅ **Auto-detects total capacity** from SmartShunt configurations
-- ✅ **Reactive updates** (no polling delay - updates immediately when any shunt changes)
-- ✅ **Combines current** (sum of all shunts)
-- ✅ **Smart voltage reporting** (prioritizes safety - reports minimum on low voltage alarm, maximum on high voltage alarm, average otherwise)
-- ✅ **Smart temperature reporting** (prioritizes danger - reports coldest when near freezing, hottest when overheating, average otherwise)
-- ✅ **Capacity-weighted SoC** calculation
-- ✅ **Passes through all alarms** from physical shunts
-- ✅ **Aggregates history data** (charge cycles, energy throughput, min/max voltages, etc.)
-- ✅ **Time-to-Go calculation** based on total remaining capacity
-- ✅ **Starter voltage monitoring** aggregation
-- ✅ **VE.Direct error counters** aggregated from all shunts
-- ✅ **Completely stateless** - all data derived from physical SmartShunts
-- ✅ **Exponential backoff** for device discovery (reduces D-Bus traffic)
+- ✅ **Single SmartShunt** discovery by product ID `0xA389` (errors if zero or more than one)
+- ✅ **JK BMS voltage** on `/Dc/0/Voltage` (auto-detect or config override)
+- ✅ **All other primary paths** from the SmartShunt (current, SoC, consumed Ah, temperature, TTG, alarms, history, VE.Direct counters)
+- ✅ **Power** derived as `voltage × current` when both are available (matches BMS voltage with shunt current)
+- ✅ **Reactive updates** (event-driven via `DbusMonitor`)
+- ✅ **Smart temperature reporting** from the shunt (threshold-based min/max/average logic)
+- ✅ **Exponential backoff** for device discovery
 
 ## Installation
 
 ### Prerequisites
 
 - Victron Cerbo GX or Venus GX running Venus OS
-- 2+ SmartShunts connected and visible on D-Bus
+- Exactly one Victron SmartShunt and a JK BMS visible on D-Bus (`com.victronenergy.battery.*`)
 - SSH access to your Venus device
 
 ### Recommended: One-Line Remote Install
@@ -76,10 +71,9 @@ If you prefer to install manually:
    ```
 
 That's it! The service will:
-- Auto-discover all SmartShunts
-- Auto-detect total capacity
-- Start aggregating immediately
-- Persist across reboots
+- Discover the single SmartShunt and resolve the JK BMS for voltage
+- Read total capacity from that SmartShunt’s configuration
+- Publish the virtual battery and persist across reboots
 
 ### Optional Configuration
 
@@ -102,6 +96,9 @@ That's it! The service will:
    
    # Device name (also editable in UI)
    DEVICE_NAME = SmartShunts
+   
+   # If more than one battery service matches "JK" in ProductName, set the full D-Bus name:
+   # JK_BMS_DBUS_SERVICE = com.victronenergy.battery.ttyUSB0
    
    # Logging level for troubleshooting
    LOGGING = INFO  # Options: ERROR, WARNING, INFO, DEBUG
@@ -133,21 +130,14 @@ dbus -y com.victronenergy.battery.ttyS5 /Soc GetValue
 
 ## How It Works
 
-1. **Discovery**: Finds all SmartShunts on D-Bus (runs every second initially, then backs off exponentially)
-2. **UI Switches**: Each discovered SmartShunt gets a toggle switch in the Venus OS UI (Settings -> Switches)
-3. **Reactive Monitoring**: Watches for value changes on all enabled SmartShunts
-4. **Instant Aggregation**: When any value changes:
-   - **Current**: Sums all enabled shunt currents (parallel batteries = currents add)
-   - **Voltage**: Smart selection based on alarm states (reports most critical voltage)
-   - **SoC**: Capacity-weighted average (accounts for different battery sizes)
-   - **Temperature**: Smart selection (reports coldest when near freezing, hottest when overheating, average otherwise)
-   - **Alarms**: Logical OR (if any shunt alarms, aggregate alarms)
-   - **History**: Aggregates charge cycles, energy throughput, min/max values
-5. **Publishing**: Updates virtual SmartShunt service immediately
+1. **Discovery**: Finds exactly one SmartShunt (`0xA389`) and resolves the JK BMS (ProductName contains `JK`, or `JK_BMS_DBUS_SERVICE`). Discovery interval backs off when stable.
+2. **UI Switches**: The SmartShunt can still be toggled via Settings → Switches like before.
+3. **Reactive monitoring**: `DbusMonitor` callbacks on the SmartShunt paths and on `/Dc/0/Voltage` for the JK service.
+4. **Publish**: Writes the virtual service: **voltage** from JK, **current / SoC / history / alarms / …** from the SmartShunt; **power** ≈ `V_jk × I_shunt` when both are valid.
 
 ## Configuration Reference
 
-See `config.default.ini` for comprehensive documentation of all settings.
+See `config.default.ini` for documentation of all settings.
 
 **All settings have defaults - config file is optional!**
 
@@ -161,28 +151,25 @@ All SmartShunt discovery and control is now managed via the Venus OS UI:
    - **ON** (default): Service scans for new SmartShunts and creates switches for them
    - **OFF**: Stops scanning, hides all switches (but continues aggregating enabled shunts)
 
-2. **Individual Shunt Switches**: Each discovered SmartShunt gets its own toggle switch
-   - **ON** (default): Shunt is included in the aggregate
-   - **OFF**: Shunt is excluded from the aggregate
+2. **Shunt switch**: The SmartShunt has a toggle switch
+   - **ON** (default): Shunt feeds the virtual monitor
+   - **OFF**: Shunt is excluded (aggregate may show stale or empty data)
 
 3. **Temperature Threshold Switches**: Two dimmable slider controls for smart temperature reporting
    - **Cold Limit**: Default 50°F (10°C) - adjustable from -58°F to 212°F (-50°C to 100°C)
-     - Below this temperature, the aggregate reports the coldest battery temperature
+     - Below this threshold, the aggregate reports the lowest shunt temperature
      - Reset to default by toggling the switch off and back on
    - **Hot Limit**: Default 105°F (40.5°C) - adjustable from -58°F to 212°F (-50°C to 100°C)
-     - Above this temperature, the aggregate reports the hottest battery temperature
+     - Above this threshold, the aggregate reports the highest shunt temperature
      - Reset to default by toggling the switch off and back on
    - Between thresholds, the aggregate reports the average temperature
    - The switch label shows the current setting in both Celsius and Fahrenheit
 
 4. **Hiding Switches**: When you're done configuring, turn off "SmartShunt Discovery" to hide all switches from the main UI. They remain accessible in the device settings if you need to change them later.
 
-**Example Use Cases:**
-- Exclude a DC loads shunt from your battery aggregate
-- Temporarily disable a shunt for testing
-- Separate house batteries from starter battery monitoring
-- Adjust temperature thresholds for LiFePO4 (wider range) vs Lead-Acid (narrower range)
-- Set temperature limits based on battery chemistry charge/discharge windows
+**Example use cases:**
+- Temporarily disable the shunt from the virtual monitor for testing
+- Adjust temperature thresholds for LiFePO4 vs lead-acid
 
 ## Managing the Service
 
@@ -215,14 +202,14 @@ All SmartShunt discovery and control is now managed via the Venus OS UI:
 
 **Check the virtual battery service:**
 ```bash
-dbus -y com.victronenergy.battery.aggregate_shunts / GetItems
+dbus -y com.victronenergy.battery.aggregateshunts / GetItems
 ```
 
 **View real-time status:**
 ```bash
-watch -n 1 'dbus -y com.victronenergy.battery.aggregate_shunts /Dc/0/Voltage GetValue && \
-            dbus -y com.victronenergy.battery.aggregate_shunts /Dc/0/Current GetValue && \
-            dbus -y com.victronenergy.battery.aggregate_shunts /Soc GetValue'
+watch -n 1 'dbus -y com.victronenergy.battery.aggregateshunts /Dc/0/Voltage GetValue && \
+            dbus -y com.victronenergy.battery.aggregateshunts /Dc/0/Current GetValue && \
+            dbus -y com.victronenergy.battery.aggregateshunts /Soc GetValue'
 ```
 
 **Check logs in real-time:**
@@ -230,41 +217,22 @@ watch -n 1 'dbus -y com.victronenergy.battery.aggregate_shunts /Dc/0/Voltage Get
 tail -f /data/apps/dbus-aggregate-smartshunts/service/log/current | tai64nlocal
 ```
 
-## Example Setups
-
-### Example 1: Basic Monitoring (Most Common)
+## Example setup
 
 **System:**
-- 2× 300Ah LiFePO4 batteries in parallel
-- 2× Victron SmartShunt 500A/50mV
-- Built-in BMS in each battery
+- One bank with a JK BMS on serial/USB (D-Bus battery service whose name or `ProductName` indicates JK)
+- One Victron SmartShunt on the same bank
 
 **Configuration:**
 ```ini
-# No config.ini needed! 
-# Service auto-detects both shunts and calculates 600Ah capacity
+# Usually no config.ini needed: JK BMS is found via ProductName containing "JK"
+# If several JK-like services exist:
+# JK_BMS_DBUS_SERVICE = com.victronenergy.battery.ttyUSB0
 ```
 
 **Result:**
-- Virtual SmartShunt shows 600Ah total capacity
-- Current is sum of both shunts
-- SoC is capacity-weighted average
-- All alarms passed through from physical shunts
-
-### Example 2: Three Shunts with Selective Aggregation
-
-**System:**
-- 3× SmartShunts, but one monitors a house battery (not part of the bank)
-
-**Configuration:**
-1. All three shunts are discovered automatically
-2. Navigate to **Settings -> Switches**
-3. Toggle OFF the "House Battery" switch
-4. Toggle OFF "SmartShunt Discovery" to hide switches
-
-**Result:**
-- Only aggregates the two bank shunts
-- House battery remains separate
+- Virtual monitor capacity matches the SmartShunt’s configured Ah
+- `/Dc/0/Voltage` follows the JK BMS; current, SoC, and history follow the SmartShunt
 
 ## Troubleshooting
 
@@ -279,47 +247,39 @@ tail -n 50 /data/apps/dbus-aggregate-smartshunts/service/log/current | tai64nloc
 - **Python errors**: Check syntax if you edited the code
 - **Permission errors**: Ensure scripts are executable (`chmod +x *.sh`)
 
-### SmartShunts not found
+### SmartShunt or JK BMS not found
 
-**Verify SmartShunts are visible:**
+**List battery services:**
 ```bash
 dbus -y | grep com.victronenergy.battery
 ```
 
-**Check each one:**
-```bash
-dbus -y com.victronenergy.battery.ttyS5 /ProductName GetValue
-```
-
-Should see "SmartShunt" in the product name.
+**SmartShunt** must report `ProductId` `0xA389`. **JK BMS** must be uniquely identifiable (ProductName contains `JK`, or set `JK_BMS_DBUS_SERVICE`).
 
 ### Capacity auto-detection not working
 
-**Requirements for auto-detection:**
-- SoC must be between 10-90% (most accurate at 30-70%)
-- All SmartShunts must have capacity configured in VictronConnect
-- ConsumedAmphours must be available
+**Requirements for capacity read:**
+- SmartShunt must expose VE.Direct configuration (capacity in register `0x1000` via VictronConnect)
 
 ### SoC seems incorrect
 
-**Check individual shunts:**
+**Check the physical SmartShunt:**
 ```bash
-dbus -y com.victronenergy.battery.ttyS5 /Soc GetValue
-dbus -y com.victronenergy.battery.ttyS6 /Soc GetValue
+dbus -y com.victronenergy.battery.<your_shunt> /Soc GetValue
 ```
 
-If individual shunts are wrong, calibrate them in VictronConnect:
+If the shunt SoC is wrong, calibrate it in VictronConnect:
 - Sync to 100% when batteries are full
 - Ensure capacity is configured correctly
 
 ## Technical Details
 
-**D-Bus Service:** `com.victronenergy.battery.aggregate_shunts`
+**D-Bus Service:** `com.victronenergy.battery.aggregateshunts`
 
-**Product ID:** `0xA389` (41865) - SmartShunt
+**Product ID:** `0xA389` (41865) - SmartShunt (mirrored on the virtual service)
 
 **Key D-Bus Paths:**
-- `/Dc/0/Voltage` - Voltage (V)
+- `/Dc/0/Voltage` - Pack voltage (V) from **JK BMS**
 - `/Dc/0/Current` - Current (A, positive = charging)
 - `/Dc/0/Power` - Power (W)
 - `/Dc/0/Temperature` - Temperature (°C)
@@ -347,10 +307,9 @@ The foundational architecture and many core components come from the original db
 
 Adapted and extended by Clinton Goudie-Nice for SmartShunt-specific use:
 - Reactive updates (event-driven instead of polling)
-- Auto-detection of SmartShunts and capacity
-- Smart voltage/temperature algorithms prioritizing battery safety
+- Auto-detection of SmartShunt capacity and single-shunt + JK BMS voltage sourcing
+- Smart temperature logic from the shunt
 - Stateless operation (all data derived from physical devices)
-- Aggregated history data from physical shunts
 - Exponential backoff for device discovery
 
 **Thanks to Anton Labanc PhD for creating the original dbus-aggregate-batteries project and sharing it under the MIT license, making this derivative work easy!**

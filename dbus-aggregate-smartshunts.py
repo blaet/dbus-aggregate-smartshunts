@@ -34,6 +34,10 @@ from gate import (
 
 VERSION = "1.0.0"
 
+# Victron SmartShunt product ID (VE.Direct battery monitor)
+SMARTSHUNT_PRODUCT_ID = 0xA389
+AGGREGATE_BATTERY_SERVICE = "com.victronenergy.battery.aggregateshunts"
+
 
 # ── Reactive-update gating (perf) ───────────────────────────────────────────
 #
@@ -68,6 +72,7 @@ class DbusAggregateSmartShunts:
     def __init__(self, config, servicename="com.victronenergy.battery.aggregateshunts"):
         self.config = config
         self._shunts = []
+        self._jk_bms_service = None  # D-Bus name for JK BMS (pack voltage source)
         self._dbusConn = get_bus()
         self._searchTrials = 1
         self._readTrials = 1
@@ -129,7 +134,7 @@ class DbusAggregateSmartShunts:
         
         # Use ProductId and ProductName from first physical shunt (for VRM compatibility)
         # This ensures VRM recognizes the aggregate as the same type of device
-        product_id = config.get('PRODUCT_ID', 0xA389)  # Default to SmartShunt if not found
+        product_id = config.get('PRODUCT_ID', SMARTSHUNT_PRODUCT_ID)
         product_name = config.get('PRODUCT_NAME', 'SmartShunt 500A/50mV')  # Default to common SmartShunt model
         
         # CustomName can be overridden in config, but ProductName should match physical shunt
@@ -599,7 +604,7 @@ class DbusAggregateSmartShunts:
         # IMPORTANT: Exclude our own service from monitoring to prevent "GetItems failed" errors
         self._dbusmon = DbusMonitor(monitorlist, valueChangedCallback=self._on_value_changed,
                                      deviceAddedCallback=None, deviceRemovedCallback=None,
-                                     ignoreServices=['com.victronenergy.battery.aggregateshunts'])
+                                     ignoreServices=[AGGREGATE_BATTERY_SERVICE])
     
     def _on_value_changed(self, dbusServiceName, dbusPath, options, changes, deviceInstance):
         """
@@ -617,23 +622,32 @@ class DbusAggregateSmartShunts:
         into the next single pass.  Steady-state bus quiet is the gate's
         job (the threshold check inside ``_update``), not this scheduler.
         """
-        # Only trigger updates for our tracked SmartShunts, not our own service
-        if "aggregate_shunts" in dbusServiceName:
+        if dbusServiceName == AGGREGATE_BATTERY_SERVICE:
             return
 
-        if dbusPath not in (
-            "/Dc/0/Voltage", "/Dc/0/Current", "/Dc/0/Power", "/Soc",
-            "/ConsumedAmphours", "/TimeToGo", "/Dc/0/Temperature",
-        ):
+        trigger_paths = (
+            "/Dc/0/Voltage",
+            "/Dc/0/Current",
+            "/Dc/0/Power",
+            "/Soc",
+            "/ConsumedAmphours",
+            "/TimeToGo",
+            "/Dc/0/Temperature",
+        )
+        if dbusPath not in trigger_paths:
             return
-        if not self._shunts:
-            return
-        if self._updating:
+        
+        shunt_services = {s["service"] for s in self._shunts}
+        if dbusServiceName in shunt_services:
+            pass
+        elif self._jk_bms_service and dbusServiceName == self._jk_bms_service:
+            if dbusPath != "/Dc/0/Voltage":
+                return
+        else:
             return
 
-        # ``_update`` returns False, so this fires exactly once per schedule.
-        GLib.idle_add(self._update)
-
+        if self._shunts and not self._updating:
+            GLib.idle_add(self._update)
     def _on_temp_low_state_changed(self, path: str, value):
         """Handle low temp threshold on/off state - reset to default when turned off"""
         new_state = bool(int(value) if isinstance(value, str) else value)
@@ -926,51 +940,122 @@ class DbusAggregateSmartShunts:
         
         logging.info(f"Created switch for {custom_name} ({service_name}) at {output_path}, enabled={enabled}")
     
+    def _resolve_jk_bms_service(self):
+        """Set self._jk_bms_service from JK_BMS_DBUS_SERVICE override or ProductName match.
+        Exits the process if auto-detect finds multiple JK candidates.
+        Returns True if a service is selected, False if not yet available.
+        """
+        override = (self.config.get("JK_BMS_DBUS_SERVICE") or "").strip()
+        if override:
+            try:
+                names = self._dbusConn.list_names()
+            except Exception as e:
+                logging.debug(f"list_names failed while resolving JK BMS: {e}")
+                return False
+            if override in names:
+                self._jk_bms_service = override
+                return True
+            return False
+        
+        candidates = []
+        try:
+            for service in self._dbusConn.list_names():
+                if "com.victronenergy.battery" not in service:
+                    continue
+                if service == AGGREGATE_BATTERY_SERVICE:
+                    continue
+                is_virtual = self._dbusmon.get_value(service, "/Devices/0/Virtual")
+                if is_virtual == 1:
+                    continue
+                pid = self._dbusmon.get_value(service, "/ProductId")
+                if pid == SMARTSHUNT_PRODUCT_ID:
+                    continue
+                product_name = self._dbusmon.get_value(service, "/ProductName")
+                if product_name and "jk" in str(product_name).lower():
+                    candidates.append(service)
+        except Exception as e:
+            logging.error(f"Error scanning for JK BMS: {e}")
+            return False
+        
+        if len(candidates) > 1:
+            logging.error(
+                "Multiple JK BMS candidates on D-Bus (ProductName contains 'JK'): %s. "
+                "Set JK_BMS_DBUS_SERVICE in config.ini to the exact service name.",
+                ", ".join(candidates),
+            )
+            sys.exit(1)
+        if len(candidates) == 1:
+            self._jk_bms_service = candidates[0]
+            return True
+        return False
+    
     def _find_smartshunts(self):
-        """Search for SmartShunt services on D-Bus
+        """Search for exactly one Victron SmartShunt (0xA389) and resolve JK BMS for pack voltage.
         
         Note: Discovery controls whether NEW switches are created, not whether we find/aggregate.
         We always search for SmartShunts, but only create switches for new ones when discovery is enabled.
         """
         # Only log at INFO level during initial search or when explicitly looking for new devices
         if not self._shunts:
-            logging.info(f"Searching for SmartShunts: Trial #{self._searchTrials}")
+            logging.info(f"Searching for SmartShunt + JK BMS: Trial #{self._searchTrials}")
         else:
-            logging.debug(f"Checking for SmartShunt changes (interval: {self._device_search_interval}s)")
+            logging.debug(f"Checking for device changes (interval: {self._device_search_interval}s)")
         
         found_shunts = []
         
         try:
             for service in self._dbusConn.list_names():
-                if "com.victronenergy.battery" in service:
-                    product_name = self._dbusmon.get_value(service, "/ProductName")
-                    
-                    # Check if this is a SmartShunt (but not a virtual aggregate)
-                    if product_name and "SmartShunt" in product_name:
-                        # Skip if this is a virtual/aggregate device (to avoid aggregating ourselves)
-                        is_virtual = self._dbusmon.get_value(service, "/Devices/0/Virtual")
-                        if is_virtual == 1:
-                            logging.debug(f"Skipping virtual device: {service}")
-                            continue
-                        
-                        device_instance = self._dbusmon.get_value(service, "/DeviceInstance")
-                        custom_name = self._dbusmon.get_value(service, "/CustomName")
-                        
-                        # Add all SmartShunts (filtering via switches instead of config)
-                        found_shunts.append({
-                            'service': service,
-                            'instance': device_instance,
-                            'name': custom_name or f"Shunt {device_instance}",
-                            'product': product_name
-                        })
-                        # Only log at INFO level during initial discovery
-                        if not self._shunts:
-                            logging.info(f"|- Found: {custom_name} [{device_instance}] - {product_name}")
-                        else:
-                            logging.debug(f"|- Found: {custom_name} [{device_instance}] - {product_name}")
+                if "com.victronenergy.battery" not in service:
+                    continue
+                if service == AGGREGATE_BATTERY_SERVICE:
+                    continue
+                
+                is_virtual = self._dbusmon.get_value(service, "/Devices/0/Virtual")
+                if is_virtual == 1:
+                    logging.debug(f"Skipping virtual device: {service}")
+                    continue
+                
+                product_id = self._dbusmon.get_value(service, "/ProductId")
+                if product_id != SMARTSHUNT_PRODUCT_ID:
+                    continue
+                
+                product_name = self._dbusmon.get_value(service, "/ProductName")
+                device_instance = self._dbusmon.get_value(service, "/DeviceInstance")
+                custom_name = self._dbusmon.get_value(service, "/CustomName")
+                
+                found_shunts.append({
+                    'service': service,
+                    'instance': device_instance,
+                    'name': custom_name or f"Shunt {device_instance}",
+                    'product': product_name or "SmartShunt",
+                })
+                if not self._shunts:
+                    logging.info(f"|- SmartShunt: {custom_name} [{device_instance}] - {product_name}")
+                else:
+                    logging.debug(f"|- SmartShunt: {custom_name} [{device_instance}] - {product_name}")
         
         except Exception as e:
             logging.error(f"Error searching for SmartShunts: {e}")
+        
+        if len(found_shunts) > 1:
+            logging.error(
+                "Expected exactly one Victron SmartShunt (ProductId 0xA389); found %d. "
+                "Remove extra shunts from the bus or disconnect them.",
+                len(found_shunts),
+            )
+            sys.exit(1)
+        
+        prev_jk = self._jk_bms_service
+        if len(found_shunts) == 0 and self._shunts:
+            # SmartShunt disappeared; drop JK pairing until shunt returns
+            self._jk_bms_service = None
+        elif len(found_shunts) == 1 or not self._shunts:
+            # Resolve JK while waiting for the shunt (startup), and whenever shunt is present
+            self._resolve_jk_bms_service()
+        
+        jk_became_ready = len(found_shunts) == 1 and self._jk_bms_service and not prev_jk
+        if jk_became_ready:
+            logging.info(f"|- JK BMS (pack voltage): {self._jk_bms_service}")
         
         # Check if device count changed (new device appeared or disappeared)
         if self._shunts and len(found_shunts) != len(self._shunts):
@@ -985,7 +1070,7 @@ class DbusAggregateSmartShunts:
             if not self._shunts or len(found_shunts) != self._last_device_count:
                 self._shunts = found_shunts
                 self._last_device_count = len(found_shunts)
-                logging.info(f"✓ Found {len(found_shunts)} SmartShunt(s) to aggregate")
+                logging.info(f"✓ Found {len(found_shunts)} SmartShunt to aggregate (pack voltage from JK BMS)")
                 
                 # Create switches for newly discovered shunts
                 for shunt in found_shunts:
@@ -1018,6 +1103,8 @@ class DbusAggregateSmartShunts:
                 if self.config['LOG_PERIOD'] > 0:
                     GLib.timeout_add_seconds(self.config['LOG_PERIOD'], self._periodic_log)
             else:
+                if jk_became_ready and self._shunts:
+                    self._update()
                 # Devices haven't changed - check if stable for 15 seconds
                 if self._devices_stable_since and (tt.time() - self._devices_stable_since) >= 15:
                     # Apply exponential backoff
@@ -1145,9 +1232,7 @@ class DbusAggregateSmartShunts:
             if self.shunt_switches.get(s['service'], {}).get('enabled', True)
         ]
 
-        # Aggregate values
-        total_voltage = 0
-        voltage_readings = []  # Collect all voltages for smart algorithm
+        # Values from SmartShunt; pack voltage comes from JK BMS (see reported_voltage below)
         total_current = 0
         total_power = 0
         total_temperature = 0
@@ -1188,8 +1273,7 @@ class DbusAggregateSmartShunts:
             for shunt in enabled_shunts:
                 service = shunt['service']
 
-                # Read values
-                voltage = self._dbusmon.get_value(service, "/Dc/0/Voltage")
+                # Read values (voltage for display is from JK BMS, not the shunt)
                 current = self._dbusmon.get_value(service, "/Dc/0/Current")
                 power = self._dbusmon.get_value(service, "/Dc/0/Power")
                 soc = self._dbusmon.get_value(service, "/Soc")
@@ -1197,10 +1281,6 @@ class DbusAggregateSmartShunts:
                 temp = self._dbusmon.get_value(service, "/Dc/0/Temperature")
                 ttg = self._dbusmon.get_value(service, "/TimeToGo")
                 
-                # Aggregate
-                if voltage is not None:
-                    voltage_readings.append(voltage)
-                    total_voltage += voltage
                 if current is not None:
                     total_current += current
                 if power is not None:
@@ -1319,42 +1399,15 @@ class DbusAggregateSmartShunts:
         # Reset read trial counter on success
         self._readTrials = 1
         
-        # Calculate averages and combined values
-        num_shunts = len(self._shunts)
         avg_soc = sum(soc_readings) / len(soc_readings) if soc_readings else 50.0
         
-        # Smart voltage selection - prioritize dangerous voltages for battery protection
-        # If any SmartShunt is alarming on voltage, report the worst-case voltage
-        if voltage_readings:
-            min_voltage = min(voltage_readings)
-            max_voltage = max(voltage_readings)
-            avg_voltage = sum(voltage_readings) / len(voltage_readings)
-            
-            # Check if any SmartShunt is triggering voltage alarms
-            low_voltage_alarm_active = any(alarm_low_voltage_list)
-            high_voltage_alarm_active = any(alarm_high_voltage_list)
-            
-            if low_voltage_alarm_active and high_voltage_alarm_active:
-                # Both voltage alarms present - report the most severe
-                # Use the voltage that's furthest from nominal (13V for 12V system)
-                nominal_voltage = 13.0
-                low_deviation = abs(min_voltage - nominal_voltage)
-                high_deviation = abs(max_voltage - nominal_voltage)
-                reported_voltage = min_voltage if low_deviation > high_deviation else max_voltage
-                logging.warning(f"Both voltage alarms active - Low: {min_voltage:.2f}V, High: {max_voltage:.2f}V, Reporting: {reported_voltage:.2f}V")
-            elif low_voltage_alarm_active:
-                # Low voltage alarm - report minimum (weakest battery)
-                reported_voltage = min_voltage
-                logging.warning(f"Low voltage alarm active - Reporting minimum: {min_voltage:.2f}V (avg: {avg_voltage:.2f}V)")
-            elif high_voltage_alarm_active:
-                # High voltage alarm - report maximum (strongest battery)
-                reported_voltage = max_voltage
-                logging.warning(f"High voltage alarm active - Reporting maximum: {max_voltage:.2f}V (avg: {avg_voltage:.2f}V)")
-            else:
-                # No alarms - all voltages in safe range, use average
-                reported_voltage = avg_voltage
+        if self._jk_bms_service:
+            reported_voltage = self._dbusmon.get_value(self._jk_bms_service, "/Dc/0/Voltage")
         else:
-            reported_voltage = 0
+            reported_voltage = None
+        
+        if reported_voltage is not None and total_current is not None:
+            total_power = reported_voltage * total_current
         
         # Smart temperature selection - prioritize dangerous temperatures for cell protection
         # LiFePO4 safe charging range: 0°C to 45°C (32°F to 113°F)
@@ -1607,28 +1660,26 @@ class DbusAggregateSmartShunts:
     def _periodic_log(self):
         """Periodic logging of status - called every LOG_PERIOD seconds"""
         try:
-            # Read current values
             voltage = self._dbusservice["/Dc/0/Voltage"]
             current = self._dbusservice["/Dc/0/Current"]
             soc = self._dbusservice["/Soc"]
+            v_disp = f"{voltage:.2f}V" if voltage is not None else "—"
+            i_disp = f"{current:.1f}A" if current is not None else "—"
+            s_disp = f"{soc:.1f}%" if soc is not None else "—"
+            logging.info(f"Status (aggregate): {v_disp} (JK BMS), {i_disp}, {s_disp} SoC")
             
-            logging.info(f"Status: {voltage:.2f}V, {current:.1f}A, {soc:.1f}% SoC")
-            
-            # Log individual shunt values (only enabled ones)
             for shunt in self._shunts:
                 name = shunt['name']
                 service = shunt['service']
                 
-                # Skip if this shunt's switch is disabled
                 if service in self.shunt_switches:
                     if not self.shunt_switches[service].get('enabled', True):
                         continue
                 
-                v = self._dbusmon.get_value(service, "/Dc/0/Voltage")
                 i = self._dbusmon.get_value(service, "/Dc/0/Current")
                 s = self._dbusmon.get_value(service, "/Soc")
-                if v is not None and i is not None and s is not None:
-                    logging.info(f"  |- {name}: {v:.2f}V, {i:.1f}A, {s:.1f}%")
+                if i is not None and s is not None:
+                    logging.info(f"  |- {name} (SmartShunt): {i:.1f}A, {s:.1f}% SoC")
         
         except Exception as e:
             logging.error(f"Error in periodic logging: {e}")
@@ -1671,7 +1722,7 @@ def main():
                     obj = bus.get_object(service_name, '/ProductId')
                     iface = dbus.Interface(obj, 'com.victronenergy.BusItem')
                     product_id = iface.GetValue()
-                    if product_id == 0xA389:  # SmartShunt
+                    if product_id == SMARTSHUNT_PRODUCT_ID:
                         # Get product name for logging
                         try:
                             obj = bus.get_object(service_name, '/ProductName')
@@ -1683,11 +1734,14 @@ def main():
                 except:
                     pass
         
-        if not shunt_services:
-            logging.error("No SmartShunts found!")
-            raise ValueError("No SmartShunts available to aggregate")
+        if len(shunt_services) != 1:
+            logging.error(
+                "Expected exactly one Victron SmartShunt (ProductId 0xA389); found %d.",
+                len(shunt_services),
+            )
+            raise ValueError("Exactly one SmartShunt required")
         
-        # Read firmware/hardware/product info from first shunt to mirror it
+        # Read firmware/hardware/product info from the SmartShunt to mirror it
         first_shunt_firmware = None
         first_shunt_firmware_int = None
         first_shunt_hardware = None
@@ -1738,143 +1792,28 @@ def main():
         except Exception as e:
             logging.warning(f"|- Could not read product ID: {e}")
         
-        # Read configuration from all shunts
-        logging.info(f"Reading configuration from {len(shunt_services)} SmartShunt(s)...")
+        logging.info("Reading configuration from SmartShunt...")
+        sole_service = shunt_services[0]
+        logging.info(f"  Reading: {sole_service}")
+        config_reader = SmartShuntConfig(sole_service)
+        if not config_reader.read_all(bus):
+            logging.error(f"Failed to read configuration from {sole_service}")
+            raise ValueError("Failed to read SmartShunt configuration")
         
-        configs = []
+        config_reader.log_all_settings()
         
-        # Read config from all shunts
-        for i, service in enumerate(shunt_services):
-            logging.info(f"  Reading shunt {i+1}/{len(shunt_services)}: {service}")
-            config_reader = SmartShuntConfig(service)
-            if config_reader.read_all(bus):
-                # Log all settings for this shunt
-                config_reader.log_all_settings()
-                
-                # Note: Monitor mode (Battery Monitor vs DC Energy Meter) is NOT readable via VE.Direct
-                # We assume all SmartShunts on this system are in Battery Monitor mode
-                # If you have DC Energy Meters, disable them via the UI switches after discovery
-                
-                configs.append(config_reader)
-                logging.info(f"    ✓ Added to aggregate")
-            else:
-                logging.error(f"    ✗ Failed to read configuration from {service}")
+        if config_reader.capacity is None:
+            logging.error(f"{sole_service}: Could not read capacity from config register!")
+            raise ValueError("Failed to read capacity from SmartShunt")
         
-        if not configs:
-            logging.error("\nNo SmartShunts available to aggregate!")
-            logging.error("Please check that SmartShunts are connected and not excluded in config")
-            raise ValueError("No valid SmartShunts to aggregate")
+        total_capacity = config_reader.capacity
+        logging.info(f"✓ Capacity: {total_capacity}Ah (SmartShunt register 0x1000)")
         
-        # Calculate total capacity from SmartShunt configuration registers
-        capacities = []
-        for config_reader in configs:
-            if config_reader.capacity is not None:
-                capacities.append(config_reader.capacity)
-                logging.info(f"{config_reader.service_name}: {config_reader.capacity}Ah (from config register 0x1000)")
-            else:
-                logging.error(f"{config_reader.service_name}: Could not read capacity from config register!")
-                raise ValueError("Failed to read capacity from SmartShunt")
+        if config_reader.charged_voltage is not None:
+            min_charged_voltage = config_reader.charged_voltage
         
-        total_capacity = sum(capacities)
-        if total_capacity > 0:
-            logging.info(f"✓ Total capacity: {total_capacity}Ah from {len(capacities)} SmartShunt(s)")
-            logging.info(f"  (read from SmartShunt configuration registers)")
-        else:
-            logging.error("Failed to read capacity from any SmartShunt!")
-            raise ValueError("No capacity information available")
-        
-        # Validate SmartShunt configuration
-        logging.info(f"SmartShunt configuration (validating {len(configs)} shunt(s)):")
-        
-        # Check consistency across all shunts
-        # CRITICAL: These settings MUST match for accurate aggregation
-        critical_settings = [
-            ('charged_voltage', 'Charged voltage', 'V', 2),
-        ]
-        
-        # RECOMMENDED: These should match for best accuracy, but not critical
-        recommended_settings = [
-            ('tail_current', 'Tail current', '%', 1),
-            ('charge_efficiency', 'Charge efficiency', '%', 0),
-            ('peukert_exponent', 'Peukert exponent', '', 2),
-            ('current_threshold', 'Current threshold', 'A', 2),
-            ('discharge_floor', 'Discharge floor', '%', 0),
-        ]
-        
-        # Check CRITICAL settings first
-        logging.info("\n  === CRITICAL Settings (must match) ===")
-        
-        for attr, name, unit, decimals in critical_settings:
-            values = [getattr(c, attr) for c in configs if getattr(c, attr) is not None]
-            
-            if values:
-                min_val = min(values)
-                max_val = max(values)
-                avg_val = sum(values) / len(values)
-                
-                # Store minimum charged voltage for charge control
-                if attr == 'charged_voltage' and min_val is not None:
-                    min_charged_voltage = min_val
-                
-                # Check if all values are the same (within tolerance for floats)
-                tolerance = 0.01 if decimals > 0 else 0.5
-                all_same = (max_val - min_val) <= tolerance
-                
-                if all_same:
-                    if decimals > 0:
-                        logging.info(f"  ✓ {name}: {avg_val:.{decimals}f}{unit} (consistent)")
-                    else:
-                        logging.info(f"  ✓ {name}: {int(avg_val)}{unit} (consistent)")
-                else:
-                    # CRITICAL MISMATCH - use minimum for safety
-                    if decimals > 0:
-                        logging.warning(f"  ⚠️  {name}: MISMATCH! Range: {min_val:.{decimals}f}{unit} to {max_val:.{decimals}f}{unit}")
-                    else:
-                        logging.warning(f"  ⚠️  {name}: MISMATCH! Range: {int(min_val)}{unit} to {int(max_val)}{unit}")
-                    logging.warning(f"     All SmartShunts should have the same {name.lower()}!")
-                    for i, c in enumerate(configs):
-                        val = getattr(c, attr)
-                        if val is not None:
-                            if decimals > 0:
-                                logging.warning(f"     Shunt {i+1}: {val:.{decimals}f}{unit}")
-                            else:
-                                logging.warning(f"     Shunt {i+1}: {int(val)}{unit}")
-                    
-                    # Use the MINIMUM (most conservative) value for safety
-                    if decimals > 0:
-                        logging.warning(f"  → Using MINIMUM value: {min_val:.{decimals}f}{unit} (prevents overcharge)")
-                    else:
-                        logging.warning(f"  → Using MINIMUM value: {int(min_val)}{unit} (prevents overcharge)")
-                    logging.warning(f"     SAFETY: This ensures no battery gets overcharged")
-        
-        # Check RECOMMENDED settings
-        logging.info("\n  === Recommended Settings (should match for best accuracy) ===")
-        for attr, name, unit, decimals in recommended_settings:
-            values = [getattr(c, attr) for c in configs if getattr(c, attr) is not None]
-            
-            if values:
-                min_val = min(values)
-                max_val = max(values)
-                avg_val = sum(values) / len(values)
-                
-                # Check if all values are the same (within tolerance for floats)
-                tolerance = 0.01 if decimals > 0 else 0.5
-                all_same = (max_val - min_val) <= tolerance
-                
-                if all_same:
-                    if decimals > 0:
-                        logging.info(f"  ✓ {name}: {avg_val:.{decimals}f}{unit} (consistent)")
-                    else:
-                        logging.info(f"  ✓ {name}: {int(avg_val)}{unit} (consistent)")
-                else:
-                    # Recommended mismatch - log as INFO/WARNING but not critical
-                    if decimals > 0:
-                        logging.info(f"  ℹ {name}: Varies - Range: {min_val:.{decimals}f}{unit} to {max_val:.{decimals}f}{unit}")
-                    else:
-                        logging.info(f"  ℹ {name}: Varies - Range: {int(min_val)}{unit} to {int(max_val)}{unit}")
-                    logging.info(f"     (Not critical, but matching values recommended for best accuracy)")
-        
-        logging.info("  Note: These are SmartShunt settings (for SoC calculation/sync)")
+        logging.info("SmartShunt configuration summary (single shunt):")
+        logging.info("  Note: Pack voltage on the aggregate is taken from the JK BMS D-Bus service.")
         logging.info("  Note: Battery protection limits (CVL/CCL/DCL) are separate config settings")
                 
     except Exception as e:
@@ -1883,8 +1822,8 @@ def main():
         logging.error(traceback.format_exc())
         logging.error("\nFailed to read capacity from SmartShunt configuration!")
         logging.error("Please ensure:")
-        logging.error("  1. SmartShunts are connected and powered on")
-        logging.error("  2. Capacity is configured in VictronConnect for each SmartShunt")
+        logging.error("  1. Exactly one SmartShunt is connected and powered on")
+        logging.error("  2. Capacity is configured in VictronConnect for that SmartShunt")
         sys.exit(1)
     
     # Create config dict
@@ -1895,8 +1834,9 @@ def main():
         'FIRMWARE_VERSION_INT': first_shunt_firmware_int if 'first_shunt_firmware_int' in locals() and first_shunt_firmware_int else None,
         'HARDWARE_VERSION': first_shunt_hardware if 'first_shunt_hardware' in locals() and first_shunt_hardware else VERSION,
         'PRODUCT_NAME': first_shunt_product_name if 'first_shunt_product_name' in locals() and first_shunt_product_name else None,
-        'PRODUCT_ID': first_shunt_product_id if 'first_shunt_product_id' in locals() and first_shunt_product_id else 0xA389,  # Default to SmartShunt
+        'PRODUCT_ID': first_shunt_product_id if 'first_shunt_product_id' in locals() and first_shunt_product_id else SMARTSHUNT_PRODUCT_ID,
         'MIN_CHARGED_VOLTAGE': min_charged_voltage if 'min_charged_voltage' in locals() else None,
+        'JK_BMS_DBUS_SERVICE': settings.JK_BMS_DBUS_SERVICE,
         'UPDATE_INTERVAL_FIND_DEVICES': settings.UPDATE_INTERVAL_FIND_DEVICES,
         'MAX_UPDATE_INTERVAL_FIND_DEVICES': settings.MAX_UPDATE_INTERVAL_FIND_DEVICES,
         'SEARCH_TRIALS': settings.SEARCH_TRIALS,
@@ -1906,10 +1846,14 @@ def main():
     }
     
     logging.info("========== Settings ==========")
-    logging.info(f"|- Mode: Monitor only (pure SmartShunt aggregation)")
+    logging.info("|- Mode: Single SmartShunt (SoC/current/etc.) + JK BMS pack voltage")
     logging.info(f"|- Total Capacity: {config['TOTAL_CAPACITY']}Ah (from SmartShunt configuration)")
-    logging.info(f"|- Charge control: DISABLED")
-    logging.info(f"|  For BMS functionality (CVL/CCL/DCL), use dbus-smartshunt-to-bms project")
+    if config.get("JK_BMS_DBUS_SERVICE"):
+        logging.info(f"|- JK BMS D-Bus service (override): {config['JK_BMS_DBUS_SERVICE']}")
+    else:
+        logging.info("|- JK BMS: auto-detect (ProductName contains 'JK')")
+    logging.info("|- Charge control: DISABLED")
+    logging.info("|  For BMS functionality (CVL/CCL/DCL), use dbus-smartshunt-to-bms project")
     
     # Create service (but don't register on D-Bus yet)
     service = DbusAggregateSmartShunts(config)
@@ -1917,7 +1861,7 @@ def main():
     # Wait for smartshunts to appear before registering
     # This prevents "GetItems failed" errors from systemcalc trying to query us
     # before we're ready to respond
-    logging.info("Waiting for SmartShunts to appear on D-Bus before registering...")
+    logging.info("Waiting for SmartShunt and JK BMS on D-Bus before registering...")
     
     # Give dbusmonitor a moment to populate its values after the initial scan
     tt.sleep(1)
@@ -1925,22 +1869,31 @@ def main():
     # Do an initial search synchronously
     service._find_smartshunts()
     
-    # If still no shunts found, wait up to 30 seconds
-    max_wait = 30  # Maximum 30 seconds
-    wait_count = 1  # We already waited 1 second above
-    while len(service._shunts) == 0 and wait_count < max_wait:
+    max_wait = 30
+    wait_count = 1
+    while (len(service._shunts) == 0 or not service._jk_bms_service) and wait_count < max_wait:
         tt.sleep(1)
         wait_count += 1
         if wait_count % 5 == 0:
-            logging.info(f"Still waiting for SmartShunts... ({wait_count}s)")
-            # Try searching again
+            logging.info(
+                f"Still waiting... ({wait_count}s) shunts={len(service._shunts)}, jk_bms={'yes' if service._jk_bms_service else 'no'}"
+            )
             service._find_smartshunts()
     
     if len(service._shunts) == 0:
-        logging.error("No SmartShunts found after 30 seconds! Service will not register.")
+        logging.error("No SmartShunt found after 30 seconds! Service will not register.")
         sys.exit(1)
     
-    logging.info(f"Found {len(service._shunts)} SmartShunt(s), proceeding with registration")
+    if not service._jk_bms_service:
+        logging.error(
+            "JK BMS not resolved after 30 seconds. Set JK_BMS_DBUS_SERVICE in config.ini "
+            "or ensure one battery service has ProductName containing 'JK'."
+        )
+        sys.exit(1)
+    
+    logging.info(
+        f"Found SmartShunt + JK BMS ({service._jk_bms_service}), proceeding with registration"
+    )
     
     # Perform initial aggregation to ensure we have valid data (voltage != None)
     # This is important because dbus-systemcalc-py only includes batteries in
