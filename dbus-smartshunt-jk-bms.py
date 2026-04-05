@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
 """
-Service to aggregate multiple Victron SmartShunts into a single virtual battery monitor.
-
-Designed for parallel battery banks where each battery has its own SmartShunt.
-Combines current, voltage, and SoC readings to present a unified battery to the system.
+Virtual battery monitor: Victron SmartShunt for SoC, current, alarms, history, etc.;
+pack voltage from a JK BMS D-Bus service.
 
 Author: Based on dbus-aggregate-batteries by Dr-Gigavolt
 License: MIT
@@ -36,7 +34,12 @@ VERSION = "1.0.0"
 
 # Victron SmartShunt product ID (VE.Direct battery monitor)
 SMARTSHUNT_PRODUCT_ID = 0xA389
-AGGREGATE_BATTERY_SERVICE = "com.victronenergy.battery.aggregateshunts"
+# Our D-Bus battery service (virtual monitor)
+VIRTUAL_BATTERY_SERVICE = "com.victronenergy.battery.smartshunt_jk"
+# Venus settings registration (device list, discovery, shunt toggles)
+SETTINGS_DEVICE_ID = "smartshuntjk_HYBRID01"
+SETTINGS_SHUNT_GROUP = "smartshuntjk"
+VIRTUAL_SERIAL = "SSJK01"
 
 
 # ── Reactive-update gating (perf) ───────────────────────────────────────────
@@ -67,9 +70,11 @@ def get_bus():
     return dbus.SessionBus() if "DBUS_SESSION_BUS_ADDRESS" in os.environ else dbus.SystemBus()
 
 
-class DbusAggregateSmartShunts:
+class DbusSmartShuntJkBms:
     
-    def __init__(self, config, servicename="com.victronenergy.battery.aggregateshunts"):
+    def __init__(self, config, servicename=None):
+        if servicename is None:
+            servicename = VIRTUAL_BATTERY_SERVICE
         self.config = config
         self._shunts = []
         self._jk_bms_service = None  # D-Bus name for JK BMS (pack voltage source)
@@ -107,8 +112,9 @@ class DbusAggregateSmartShunts:
         # Early load of discovery setting (before switches are created)
         # This ensures discovery_enabled is correct before _find_smartshunts runs
         try:
-            settings_obj = self._dbusConn.get_object('com.victronenergy.settings', 
-                '/Settings/Devices/aggregateshunts_AGGREGATE01/DiscoveryEnabled')
+            settings_obj = self._dbusConn.get_object(
+                'com.victronenergy.settings',
+                f'/Settings/Devices/{SETTINGS_DEVICE_ID}/DiscoveryEnabled')
             settings_iface = dbus.Interface(settings_obj, 'com.victronenergy.BusItem')
             saved_discovery = settings_iface.GetValue()
             if saved_discovery is not None:
@@ -123,7 +129,7 @@ class DbusAggregateSmartShunts:
         # Create management objects
         self._dbusservice.add_path("/Mgmt/ProcessName", __file__)
         self._dbusservice.add_path("/Mgmt/ProcessVersion", "Python " + platform.python_version())
-        self._dbusservice.add_path("/Mgmt/Connection", "Virtual SmartShunt Aggregator")
+        self._dbusservice.add_path("/Mgmt/Connection", "SmartShunt + JK BMS (virtual battery)")
         
         # Find an available device instance (check what's already in use)
         device_instance = self._find_available_device_instance()
@@ -133,12 +139,12 @@ class DbusAggregateSmartShunts:
         self._dbusservice.add_path("/DeviceInstance", device_instance)
         
         # Use ProductId and ProductName from first physical shunt (for VRM compatibility)
-        # This ensures VRM recognizes the aggregate as the same type of device
+        # This helps VRM treat the virtual device like a physical SmartShunt product
         product_id = config.get('PRODUCT_ID', SMARTSHUNT_PRODUCT_ID)
         product_name = config.get('PRODUCT_NAME', 'SmartShunt 500A/50mV')  # Default to common SmartShunt model
         
         # CustomName can be overridden in config, but ProductName should match physical shunt
-        custom_name = config['DEVICE_NAME'] if config['DEVICE_NAME'] else "SmartShunt Aggregate"
+        custom_name = config['DEVICE_NAME'] if config['DEVICE_NAME'] else "SmartShunt + JK BMS"
         
         self._dbusservice.add_path("/ProductId", product_id,
             gettextcallback=lambda a, x: f"0x{x:X}" if x and isinstance(x, int) else "")
@@ -150,7 +156,7 @@ class DbusAggregateSmartShunts:
         self._dbusservice.add_path("/HardwareVersion", [],
             gettextcallback=lambda a, x: "")
         self._dbusservice.add_path("/Connected", 1)
-        self._dbusservice.add_path("/Serial", "AGGREGATE01")
+        self._dbusservice.add_path("/Serial", VIRTUAL_SERIAL)
         self._dbusservice.add_path("/CustomName", custom_name)
         
         # Create DC paths
@@ -292,8 +298,8 @@ class DbusAggregateSmartShunts:
             gettextcallback=lambda a, x: f"v{(x >> 8) & 0xFF}.{x & 0xFF:x}" if x and isinstance(x, int) else "")
         self._dbusservice.add_path("/Devices/0/ProductId", product_id,
             gettextcallback=lambda a, x: f"0x{x:X}" if x and isinstance(x, int) else "")
-        self._dbusservice.add_path("/Devices/0/ProductName", f"{product_name} (Aggregate)")
-        self._dbusservice.add_path("/Devices/0/ServiceName", "com.victronenergy.battery.aggregateshunts")
+        self._dbusservice.add_path("/Devices/0/ProductName", f"{product_name} + JK pack V")
+        self._dbusservice.add_path("/Devices/0/ServiceName", VIRTUAL_BATTERY_SERVICE)
         self._dbusservice.add_path("/Devices/0/VregLink", [],
             gettextcallback=lambda a, x: "")
         # Flag to identify this as a virtual aggregate (so dbus-smartshunt-to-bms can exclude it)
@@ -311,7 +317,7 @@ class DbusAggregateSmartShunts:
         self._device_instance = device_instance
         
         # Add master discovery switch (relay_discovery)
-        self._dbusservice.add_path('/SwitchableOutput/relay_discovery/Name', '* SmartShunt Discovery')
+        self._dbusservice.add_path('/SwitchableOutput/relay_discovery/Name', '* SmartShunt + JK')
         self._dbusservice.add_path('/SwitchableOutput/relay_discovery/Type', 1)  # Toggle switch
         self._dbusservice.add_path('/SwitchableOutput/relay_discovery/State', 1, 
                                    writeable=True, onchangecallback=self._on_discovery_changed)
@@ -463,7 +469,7 @@ class DbusAggregateSmartShunts:
         """Register device in com.victronenergy.settings for GUI device list"""
         try:
             # Create unique identifier for settings path (using serial number)
-            unique_id = "aggregateshunts_AGGREGATE01"
+            unique_id = SETTINGS_DEVICE_ID
             settings_path = f"/Settings/Devices/{unique_id}"
             
             # Create ClassAndVrmInstance setting
@@ -604,7 +610,7 @@ class DbusAggregateSmartShunts:
         # IMPORTANT: Exclude our own service from monitoring to prevent "GetItems failed" errors
         self._dbusmon = DbusMonitor(monitorlist, valueChangedCallback=self._on_value_changed,
                                      deviceAddedCallback=None, deviceRemovedCallback=None,
-                                     ignoreServices=[AGGREGATE_BATTERY_SERVICE])
+                                     ignoreServices=[VIRTUAL_BATTERY_SERVICE])
     
     def _on_value_changed(self, dbusServiceName, dbusPath, options, changes, deviceInstance):
         """
@@ -622,7 +628,7 @@ class DbusAggregateSmartShunts:
         into the next single pass.  Steady-state bus quiet is the gate's
         job (the threshold check inside ``_update``), not this scheduler.
         """
-        if dbusServiceName == AGGREGATE_BATTERY_SERVICE:
+        if dbusServiceName == VIRTUAL_BATTERY_SERVICE:
             return
 
         trigger_paths = (
@@ -801,7 +807,7 @@ class DbusAggregateSmartShunts:
             
             # Note: Discovery switch (relay_0) is NEVER hidden - users need it to re-enable discovery
             
-            logging.info(f"SmartShunt Discovery {'enabled' if new_enabled else 'disabled'} - all switches {'visible' if new_enabled else 'hidden'}")
+            logging.info(f"Monitor discovery {'enabled' if new_enabled else 'disabled'} - shunt switches {'visible' if new_enabled else 'hidden'}")
         
         return True
     
@@ -820,7 +826,7 @@ class DbusAggregateSmartShunts:
                 
                 # Trigger aggregation update
                 if not self._updating:
-                    self._update_values()
+                    self._update()
         
         return True
     
@@ -839,7 +845,7 @@ class DbusAggregateSmartShunts:
         """Get shunt enabled state from settings"""
         try:
             key = self._get_shunt_setting_key(service_name)
-            settings_path = f"/Settings/Devices/aggregateshunts/shunt_{key}"
+            settings_path = f"/Settings/Devices/{SETTINGS_SHUNT_GROUP}/shunt_{key}"
             settings_obj = self._dbusConn.get_object('com.victronenergy.settings', settings_path)
             settings_iface = dbus.Interface(settings_obj, 'com.victronenergy.BusItem')
             value = settings_iface.GetValue()
@@ -852,13 +858,13 @@ class DbusAggregateSmartShunts:
         """Save shunt enabled state to settings"""
         try:
             key = self._get_shunt_setting_key(service_name)
-            settings_path = f"/Settings/Devices/aggregateshunts/shunt_{key}"
+            settings_path = f"/Settings/Devices/{SETTINGS_SHUNT_GROUP}/shunt_{key}"
             
             settings_obj = self._dbusConn.get_object('com.victronenergy.settings', '/Settings')
             settings_iface = dbus.Interface(settings_obj, 'com.victronenergy.Settings')
             # AddSetting(group, name, default, type, min, max)
             settings_iface.AddSetting(
-                'Devices/aggregateshunts',
+                f'Devices/{SETTINGS_SHUNT_GROUP}',
                 f'shunt_{key}',
                 1,  # Default: enabled
                 'i',  # integer
@@ -962,7 +968,7 @@ class DbusAggregateSmartShunts:
             for service in self._dbusConn.list_names():
                 if "com.victronenergy.battery" not in service:
                     continue
-                if service == AGGREGATE_BATTERY_SERVICE:
+                if service == VIRTUAL_BATTERY_SERVICE:
                     continue
                 is_virtual = self._dbusmon.get_value(service, "/Devices/0/Virtual")
                 if is_virtual == 1:
@@ -1007,7 +1013,7 @@ class DbusAggregateSmartShunts:
             for service in self._dbusConn.list_names():
                 if "com.victronenergy.battery" not in service:
                     continue
-                if service == AGGREGATE_BATTERY_SERVICE:
+                if service == VIRTUAL_BATTERY_SERVICE:
                     continue
                 
                 is_virtual = self._dbusmon.get_value(service, "/Devices/0/Virtual")
@@ -1070,7 +1076,7 @@ class DbusAggregateSmartShunts:
             if not self._shunts or len(found_shunts) != self._last_device_count:
                 self._shunts = found_shunts
                 self._last_device_count = len(found_shunts)
-                logging.info(f"✓ Found {len(found_shunts)} SmartShunt to aggregate (pack voltage from JK BMS)")
+                logging.info(f"✓ Found {len(found_shunts)} SmartShunt (pack voltage from JK BMS)")
                 
                 # Create switches for newly discovered shunts
                 for shunt in found_shunts:
@@ -1214,7 +1220,7 @@ class DbusAggregateSmartShunts:
                 logging.warning(f"Error updating /Devices/{instance} paths: {e}")
     
     def _update(self):
-        """Main update function - aggregate SmartShunt data and update D-Bus"""
+        """Read SmartShunt values and JK voltage, then publish virtual battery data."""
 
         # Prevent recursive updates
         if self._updating:
@@ -1666,7 +1672,7 @@ class DbusAggregateSmartShunts:
             v_disp = f"{voltage:.2f}V" if voltage is not None else "—"
             i_disp = f"{current:.1f}A" if current is not None else "—"
             s_disp = f"{soc:.1f}%" if soc is not None else "—"
-            logging.info(f"Status (aggregate): {v_disp} (JK BMS), {i_disp}, {s_disp} SoC")
+            logging.info(f"Status (virtual battery): {v_disp} (JK BMS), {i_disp}, {s_disp} SoC")
             
             for shunt in self._shunts:
                 name = shunt['name']
@@ -1695,7 +1701,7 @@ def main():
     logging.basicConfig(level=settings.LOGGING_LEVEL)
     
     logging.info("")
-    logging.info("*** Starting dbus-aggregate-smartshunts ***")
+    logging.info("*** Starting dbus-smartshunt-jk-bms ***")
     logging.info(f"Version: {VERSION}")
     
     # Initialize D-Bus main loop
@@ -1813,7 +1819,7 @@ def main():
             min_charged_voltage = config_reader.charged_voltage
         
         logging.info("SmartShunt configuration summary (single shunt):")
-        logging.info("  Note: Pack voltage on the aggregate is taken from the JK BMS D-Bus service.")
+        logging.info("  Note: Pack voltage on the virtual battery is taken from the JK BMS D-Bus service.")
         logging.info("  Note: Battery protection limits (CVL/CCL/DCL) are separate config settings")
                 
     except Exception as e:
@@ -1856,7 +1862,7 @@ def main():
     logging.info("|  For BMS functionality (CVL/CCL/DCL), use dbus-smartshunt-to-bms project")
     
     # Create service (but don't register on D-Bus yet)
-    service = DbusAggregateSmartShunts(config)
+    service = DbusSmartShuntJkBms(config)
     
     # Wait for smartshunts to appear before registering
     # This prevents "GetItems failed" errors from systemcalc trying to query us

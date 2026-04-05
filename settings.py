@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Settings loader for dbus-aggregate-smartshunts
+Settings loader for dbus-smartshunt-jk-bms
 Reads config.default.ini and config.ini (user overrides)
 """
 
@@ -126,7 +126,7 @@ def get_list_from_config(group: str, option: str) -> list:
 # Device Configuration
 DEVICE_NAME = config["DEFAULT"].get("DEVICE_NAME", "").strip()
 if not DEVICE_NAME:
-    DEVICE_NAME = "SmartShunts"
+    DEVICE_NAME = "SmartShunt + JK BMS"
 
 # Battery Specifications
 # Capacity is always read from the single SmartShunt configuration registers (no config needed)
@@ -134,8 +134,10 @@ if not DEVICE_NAME:
 # Optional full D-Bus service name for JK BMS (pack voltage source). Empty = auto-detect by ProductName.
 JK_BMS_DBUS_SERVICE = config["DEFAULT"].get("JK_BMS_DBUS_SERVICE", "").strip()
 
-# Device Naming
+# Device Naming (second read allows override file to win; re-apply default if empty)
 DEVICE_NAME = config["DEFAULT"].get("DEVICE_NAME", "").strip()
+if not DEVICE_NAME:
+    DEVICE_NAME = "SmartShunt + JK BMS"
 
 # Note: BMS functionality (DEVICE_MODE, MAX_CHARGE_VOLTAGE, MAX_CHARGE_CURRENT, MAX_DISCHARGE_CURRENT) 
 # has been removed from this project. This is now pure monitoring only.

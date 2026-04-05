@@ -1,30 +1,30 @@
 #!/bin/bash
 
-# Restart dbus-aggregate-smartshunts service
+# Restart dbus-smartshunt-jk-bms service
 
-SERVICE_LINK="/service/dbus-aggregate-smartshunts"
+SERVICE_LINK="/service/dbus-smartshunt-jk-bms"
 
-echo "=== Restarting dbus-aggregate-smartshunts ==="
+echo "=== Restarting dbus-smartshunt-jk-bms ==="
 
-if [ -L "$SERVICE_LINK" ]; then
-    echo "Stopping service..."
-    svc -d "$SERVICE_LINK"
-    sleep 2
-    
-    echo "Starting service..."
-    svc -u "$SERVICE_LINK"
-    sleep 2
-    
-    svstat "$SERVICE_LINK"
-    echo ""
-    echo "Service restarted!"
-else
-    echo "Error: Service not enabled. Run enable.sh first."
+if [ ! -L "$SERVICE_LINK" ]; then
+    echo "Error: Service not installed at $SERVICE_LINK"
+    echo "Run install-service.sh first"
     exit 1
 fi
 
-echo ""
-echo "To check logs:"
-echo "  tail -f /data/apps/dbus-aggregate-smartshunts/service/log/current"
-echo ""
+echo "Restarting service..."
+svc -t "$SERVICE_LINK"
 
+sleep 2
+
+if svstat "$SERVICE_LINK" 2>/dev/null | grep -q "up"; then
+    echo "✓ Service restarted successfully"
+else
+    echo "Warning: Service may not be running. Check status:"
+    svstat "$SERVICE_LINK"
+fi
+
+echo ""
+echo "View logs:"
+echo "  tail -f /data/apps/dbus-smartshunt-jk-bms/service/log/current"
+echo ""

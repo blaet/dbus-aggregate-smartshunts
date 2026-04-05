@@ -1,4 +1,4 @@
-# dbus-aggregate-smartshunts
+# dbus-smartshunt-jk-bms
 
 A Victron Venus OS service that exposes a **single virtual SmartShunt** on D-Bus using **one** Victron SmartShunt for current, SoC, alarms, history, and other monitor paths, while taking **pack voltage** from a **JK BMS** service (typical `dbus-serialbattery` / similar driver on Venus).
 
@@ -29,6 +29,19 @@ Use one SmartShunt for accurate coulomb counting and monitoring, but show **cell
 - ✅ **Smart temperature reporting** from the shunt (threshold-based min/max/average logic)
 - ✅ **Exponential backoff** for device discovery
 
+## Git branch
+
+The **SmartShunt + JK BMS** behaviour lives on branch **`flavour/jk-bms-voltage`**. Use that branch for installs and updates (`install.sh` defaults to it). Other branches may carry different product flavours.
+
+## Migrating from `dbus-aggregate-smartshunts`
+
+If you used the old service name and install path:
+
+1. Run the old project’s `disable.sh` (or remove `/service/dbus-aggregate-smartshunts` and the old `rc.local` line).
+2. Clone this repo to `/data/apps/dbus-smartshunt-jk-bms`, check out **`flavour/jk-bms-voltage`**, and run `install-service.sh`.
+3. Copy `config.ini` from the old directory if you had custom settings.
+4. The D-Bus service name is now `com.victronenergy.battery.smartshunt_jk`; GUI device settings use new paths under `smartshuntjk_*`.
+
 ## Installation
 
 ### Prerequisites
@@ -40,14 +53,16 @@ Use one SmartShunt for accurate coulomb counting and monitoring, but show **cell
 ### Recommended: One-Line Remote Install
 
 ```bash
-ssh root@<cerbo-ip> "curl -fsSL https://raw.githubusercontent.com/TechBlueprints/dbus-aggregate-smartshunts/main/install.sh | bash"
+ssh root@<cerbo-ip> "curl -fsSL https://raw.githubusercontent.com/blaet/dbus-aggregate-smartshunts/flavour/jk-bms-voltage/install.sh | bash"
 ```
 
 This will:
 - Install `git` if needed
-- Clone or update the repository
+- Clone or update the repository on branch **`flavour/jk-bms-voltage`**
 - Install and start the service
 - Survive reboots automatically
+
+To use another branch, export variables for the shell running the script, e.g. `curl ... | REPO_BRANCH=main bash`.
 
 ### Manual Installation
 
@@ -58,12 +73,13 @@ If you prefer to install manually:
    ssh root@cerbo
    ```
 
-2. **Clone the repository:**
+2. **Clone the repository** (directory name matches the Venus install path; branch **`flavour/jk-bms-voltage`**):
    ```bash
    cd /data/apps
-   git clone https://github.com/TechBlueprints/dbus-aggregate-smartshunts.git
-   cd dbus-aggregate-smartshunts
+   git clone -b flavour/jk-bms-voltage --single-branch https://github.com/blaet/dbus-aggregate-smartshunts.git dbus-smartshunt-jk-bms
+   cd dbus-smartshunt-jk-bms
    ```
+   SSH: `git clone -b flavour/jk-bms-voltage --single-branch git@github.com:blaet/dbus-aggregate-smartshunts.git dbus-smartshunt-jk-bms`
 
 3. **Run the service installer:**
    ```bash
@@ -78,7 +94,7 @@ That's it! The service will:
 ### Optional Configuration
 
 **No config file is required!** The service runs with sensible defaults:
-- Device name: "SmartShunts" (editable in UI)
+- Device name: "SmartShunt + JK BMS" (editable in UI)
 - Temperature thresholds: Configurable via UI switches (see below)
 - SmartShunt selection: Managed via UI switches (see below)
 
@@ -95,7 +111,7 @@ That's it! The service will:
    [DEFAULT]
    
    # Device name (also editable in UI)
-   DEVICE_NAME = SmartShunts
+   DEVICE_NAME = SmartShunt + JK BMS
    
    # If more than one battery service matches "JK" in ProductName, set the full D-Bus name:
    # JK_BMS_DBUS_SERVICE = com.victronenergy.battery.ttyUSB0
@@ -147,13 +163,13 @@ The config file is only needed for advanced operational settings like logging le
 
 All SmartShunt discovery and control is now managed via the Venus OS UI:
 
-1. **Discovery Switch**: Navigate to **Settings -> Switches** and find "* SmartShunt Discovery"
-   - **ON** (default): Service scans for new SmartShunts and creates switches for them
-   - **OFF**: Stops scanning, hides all switches (but continues aggregating enabled shunts)
+1. **Discovery switch**: Navigate to **Settings → Switches** and find "* SmartShunt + JK"
+   - **ON** (default): Creates or restores the shunt toggle in the UI when discovery runs
+   - **OFF**: Hides shunt-related switches (monitoring continues for enabled shunt)
 
 2. **Shunt switch**: The SmartShunt has a toggle switch
    - **ON** (default): Shunt feeds the virtual monitor
-   - **OFF**: Shunt is excluded (aggregate may show stale or empty data)
+   - **OFF**: Shunt is excluded (virtual battery may show stale or empty data)
 
 3. **Temperature Threshold Switches**: Two dimmable slider controls for smart temperature reporting
    - **Cold Limit**: Default 50°F (10°C) - adjustable from -58°F to 212°F (-50°C to 100°C)
@@ -165,7 +181,7 @@ All SmartShunt discovery and control is now managed via the Venus OS UI:
    - Between thresholds, the aggregate reports the average temperature
    - The switch label shows the current setting in both Celsius and Fahrenheit
 
-4. **Hiding Switches**: When you're done configuring, turn off "SmartShunt Discovery" to hide all switches from the main UI. They remain accessible in the device settings if you need to change them later.
+4. **Hiding switches**: When you're done configuring, turn off "* SmartShunt + JK" to hide shunt switches from the main UI. They may remain under device settings if you need them later.
 
 **Example use cases:**
 - Temporarily disable the shunt from the virtual monitor for testing
@@ -175,46 +191,46 @@ All SmartShunt discovery and control is now managed via the Venus OS UI:
 
 **View logs:**
 ```bash
-/data/apps/dbus-aggregate-smartshunts/get-logs.sh
+/data/apps/dbus-smartshunt-jk-bms/get-logs.sh
 ```
 
 **Restart after config changes:**
 ```bash
-/data/apps/dbus-aggregate-smartshunts/restart.sh
+/data/apps/dbus-smartshunt-jk-bms/restart.sh
 ```
 
 **Disable service:**
 ```bash
-/data/apps/dbus-aggregate-smartshunts/disable.sh
+/data/apps/dbus-smartshunt-jk-bms/disable.sh
 ```
 
 **Re-enable service:**
 ```bash
-/data/apps/dbus-aggregate-smartshunts/enable.sh
+/data/apps/dbus-smartshunt-jk-bms/enable.sh
 ```
 
 **Uninstall:**
 ```bash
-/data/apps/dbus-aggregate-smartshunts/uninstall.sh
+/data/apps/dbus-smartshunt-jk-bms/uninstall.sh
 ```
 
 ## Monitoring
 
 **Check the virtual battery service:**
 ```bash
-dbus -y com.victronenergy.battery.aggregateshunts / GetItems
+dbus -y com.victronenergy.battery.smartshunt_jk / GetItems
 ```
 
 **View real-time status:**
 ```bash
-watch -n 1 'dbus -y com.victronenergy.battery.aggregateshunts /Dc/0/Voltage GetValue && \
-            dbus -y com.victronenergy.battery.aggregateshunts /Dc/0/Current GetValue && \
-            dbus -y com.victronenergy.battery.aggregateshunts /Soc GetValue'
+watch -n 1 'dbus -y com.victronenergy.battery.smartshunt_jk /Dc/0/Voltage GetValue && \
+            dbus -y com.victronenergy.battery.smartshunt_jk /Dc/0/Current GetValue && \
+            dbus -y com.victronenergy.battery.smartshunt_jk /Soc GetValue'
 ```
 
 **Check logs in real-time:**
 ```bash
-tail -f /data/apps/dbus-aggregate-smartshunts/service/log/current | tai64nlocal
+tail -f /data/apps/dbus-smartshunt-jk-bms/service/log/current | tai64nlocal
 ```
 
 ## Example setup
@@ -240,7 +256,7 @@ tail -f /data/apps/dbus-aggregate-smartshunts/service/log/current | tai64nlocal
 
 **Check logs:**
 ```bash
-tail -n 50 /data/apps/dbus-aggregate-smartshunts/service/log/current | tai64nlocal
+tail -n 50 /data/apps/dbus-smartshunt-jk-bms/service/log/current | tai64nlocal
 ```
 
 **Common issues:**
@@ -274,7 +290,7 @@ If the shunt SoC is wrong, calibrate it in VictronConnect:
 
 ## Technical Details
 
-**D-Bus Service:** `com.victronenergy.battery.aggregateshunts`
+**D-Bus Service:** `com.victronenergy.battery.smartshunt_jk`
 
 **Product ID:** `0xA389` (41865) - SmartShunt (mirrored on the virtual service)
 
@@ -288,7 +304,7 @@ If the shunt SoC is wrong, calibrate it in VictronConnect:
 - `/InstalledCapacity` - Total capacity (Ah)
 - `/ConsumedAmphours` - Energy consumed (Ah)
 - `/TimeToGo` - Time remaining (seconds)
-- `/History/*` - Aggregated history data
+- `/History/*` - From the SmartShunt
 - `/Alarms/*` - Passed through from physical shunts
 
 ## Credits
@@ -303,11 +319,11 @@ The foundational architecture and many core components come from the original db
 - Service management scripts (install, enable, disable, restart, uninstall)
 - Core aggregation logic and algorithms
 
-### Modifications for SmartShunt Aggregation
+### Modifications (SmartShunt + JK BMS)
 
-Adapted and extended by Clinton Goudie-Nice for SmartShunt-specific use:
+Adapted and extended by Clinton Goudie-Nice for SmartShunt-centric monitoring:
 - Reactive updates (event-driven instead of polling)
-- Auto-detection of SmartShunt capacity and single-shunt + JK BMS voltage sourcing
+- Single SmartShunt with JK BMS pack voltage on the virtual battery service
 - Smart temperature logic from the shunt
 - Stateless operation (all data derived from physical devices)
 - Exponential backoff for device discovery
@@ -327,4 +343,4 @@ service scripts, and core aggregation logic) are retained and modified.
 
 ## Support
 
-For issues, questions, or contributions, please open an issue on GitHub.
+For issues, questions, or contributions, see [github.com/blaet/dbus-aggregate-smartshunts](https://github.com/blaet/dbus-aggregate-smartshunts).

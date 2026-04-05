@@ -17,15 +17,15 @@ This approach follows the pattern used by Victron's own [dbus-serialbattery](htt
 - **Purpose**: Venus OS D-Bus integration library
 - **Source**: https://github.com/victronenergy/velib_python
 - **License**: MIT
-- **Why needed**: 
-  - Creates D-Bus service for the aggregated SmartShunt battery device
-  - Monitors multiple SmartShunt devices via DbusMonitor
+- **Why needed**:
+  - Creates the virtual battery D-Bus service (`com.victronenergy.battery.smartshunt_jk`)
+  - Monitors the SmartShunt and JK BMS via DbusMonitor
   - Manages device settings via SettingsDevice
-  - Publishes aggregated battery metrics to Venus OS GUI/VRM
+  - Publishes battery metrics to Venus OS GUI / VRM
 
-## Architecture Note
+## Architecture note
 
-This service monitors multiple Victron SmartShunt devices on the D-Bus, aggregates their readings (voltage, current, SOC, temperature), and publishes a unified battery device. It provides UI-controlled temperature thresholds and SmartShunt selection via SwitchableOutput controls.
+This service reads one Victron SmartShunt plus pack voltage from a JK BMS D-Bus service and publishes a single virtual battery. UI temperature thresholds and shunt enable/disable use SwitchableOutput controls.
 
 ## Updating Dependencies
 

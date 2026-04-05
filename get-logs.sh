@@ -1,16 +1,14 @@
 #!/bin/bash
 
-# Show logs from dbus-aggregate-smartshunts
+# Show logs from dbus-smartshunt-jk-bms
 
-LOG_DIR="/data/apps/dbus-aggregate-smartshunts/service/log"
+LOG_DIR="/data/apps/dbus-smartshunt-jk-bms/service/log"
 
 if [ -d "$LOG_DIR" ]; then
-    echo "=== dbus-aggregate-smartshunts logs ==="
-    echo "Press Ctrl+C to exit"
+    echo "=== dbus-smartshunt-jk-bms logs ==="
     echo ""
-    tail -f "$LOG_DIR/current" | tai64nlocal
+    tail -n 100 "$LOG_DIR/current" 2>/dev/null | tai64nlocal 2>/dev/null || tail -n 100 "$LOG_DIR/current"
 else
-    echo "Error: Log directory not found at $LOG_DIR"
-    exit 1
+    echo "Log directory not found: $LOG_DIR"
+    echo "Is the service installed?"
 fi
-

@@ -1,29 +1,29 @@
 #!/bin/bash
 #
-# Remote installer for dbus-aggregate-smartshunts on Venus OS
-# 
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/TechBlueprints/dbus-aggregate-smartshunts/main/install.sh | bash
+# Remote installer for dbus-smartshunt-jk-bms on Venus OS
 #
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/blaet/dbus-aggregate-smartshunts/flavour/jk-bms-voltage/install.sh | bash
+#
+# Optional: REPO_URL, REPO_BRANCH (default branch for this flavour)
 
 set -e
 
-REPO_URL="https://github.com/TechBlueprints/dbus-aggregate-smartshunts.git"
-INSTALL_DIR="/data/apps/dbus-aggregate-smartshunts"
-SERVICE_NAME="dbus-aggregate-smartshunts"
+REPO_URL="${REPO_URL:-https://github.com/blaet/dbus-aggregate-smartshunts.git}"
+REPO_BRANCH="${REPO_BRANCH:-flavour/jk-bms-voltage}"
+INSTALL_DIR="/data/apps/dbus-smartshunt-jk-bms"
+SERVICE_NAME="dbus-smartshunt-jk-bms"
 
 echo "========================================"
-echo "SmartShunt Aggregator Installer"
+echo "SmartShunt + JK BMS — installer"
 echo "========================================"
 echo ""
 
-# Check if running on Venus OS
 if [ ! -d "/data/apps" ]; then
     echo "Error: /data/apps not found. This script must run on Venus OS."
     exit 1
 fi
 
-# Step 1: Ensure git is installed
 echo "Step 1: Checking for git..."
 if ! command -v git >/dev/null 2>&1; then
     echo "Git not found. Installing git..."
@@ -37,7 +37,6 @@ else
 fi
 echo ""
 
-# Step 2: Clone or update repository
 echo "Step 2: Setting up repository..."
 cd /data/apps
 
@@ -46,18 +45,15 @@ NEEDS_RESTART=false
 if [ -d "$INSTALL_DIR" ]; then
     echo "Directory exists: $INSTALL_DIR"
     cd "$INSTALL_DIR"
-    
-    # Check if it's already a git repository
+
     if [ -d .git ]; then
-        echo "Already a git repository. Checking for updates..."
-        
-        # Fetch latest changes
+        echo "Already a git repository. Checking for updates (branch: $REPO_BRANCH)..."
         git fetch origin
-        
-        # Check if there are differences
+        git checkout "$REPO_BRANCH" 2>/dev/null || git checkout -b "$REPO_BRANCH" "origin/$REPO_BRANCH"
+        git branch --set-upstream-to="origin/$REPO_BRANCH" "$REPO_BRANCH" 2>/dev/null || true
         LOCAL=$(git rev-parse HEAD)
-        REMOTE=$(git rev-parse origin/main)
-        
+        REMOTE=$(git rev-parse "origin/$REPO_BRANCH")
+
         if [ "$LOCAL" != "$REMOTE" ]; then
             echo "Updates available. Pulling latest changes..."
             git pull
@@ -67,63 +63,43 @@ if [ -d "$INSTALL_DIR" ]; then
             echo "✓ Already up to date"
         fi
     else
-        echo "Not a git repository. Converting to git repository..."
-        
-        # Initialize as git repo
+        echo "Not a git repository. Converting..."
         git init
-        
-        # Add to safe directories (ownership consideration)
         git config --global --add safe.directory "$INSTALL_DIR"
-        
-        # Add remote
         git remote add origin "$REPO_URL"
-        
-        # Fetch and reset to main
         git fetch origin
-        git checkout -b main
-        git reset --hard origin/main
-        git branch --set-upstream-to=origin/main main
-        
+        git checkout -b "$REPO_BRANCH" "origin/$REPO_BRANCH"
+        git branch --set-upstream-to="origin/$REPO_BRANCH" "$REPO_BRANCH"
         NEEDS_RESTART=true
-        echo "✓ Converted to git repository and updated to latest"
+        echo "✓ Converted to git repository"
     fi
 else
-    echo "Directory does not exist. Cloning repository..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
+    echo "Cloning repository (branch: $REPO_BRANCH)..."
+    git clone -b "$REPO_BRANCH" --single-branch "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
-    
-    # Add to safe directories
     git config --global --add safe.directory "$INSTALL_DIR"
-    
-    NEEDS_RESTART=false  # New install, not a restart
+    NEEDS_RESTART=false
     echo "✓ Repository cloned"
 fi
 echo ""
 
-# Step 3: Install or restart service
 echo "Step 3: Installing/updating service..."
 
-# Check if service is already running
 if [ -L "/service/$SERVICE_NAME" ] && svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q "up"; then
     if [ "$NEEDS_RESTART" = true ]; then
-        echo "Service is already installed and running."
-        echo "Updates detected. Restarting service..."
+        echo "Service running; restarting after update..."
         svc -t "/service/$SERVICE_NAME"
         sleep 2
-        
-        # Verify it restarted
         if svstat "/service/$SERVICE_NAME" 2>/dev/null | grep -q "up"; then
             echo "✓ Service restarted successfully"
         else
-            echo "Warning: Service may not have restarted properly. Check logs:"
-            echo "  tail -f /var/log/$SERVICE_NAME/current"
+            echo "Warning: Check logs: tail -f $INSTALL_DIR/service/log/current"
         fi
     else
-        echo "Service is already installed and running."
         echo "✓ No updates needed"
     fi
 else
-    echo "Service not installed or not running. Running installation..."
+    echo "Running install-service.sh..."
     bash "$INSTALL_DIR/install-service.sh"
 fi
 echo ""
@@ -133,14 +109,13 @@ echo "Installation Complete!"
 echo "========================================"
 echo ""
 echo "Service status:"
-svstat "/service/$SERVICE_NAME"
+svstat "/service/$SERVICE_NAME" 2>/dev/null || echo "(not linked yet)"
 echo ""
 echo "View logs:"
-echo "  tail -f /var/log/$SERVICE_NAME/current"
+echo "  tail -f $INSTALL_DIR/service/log/current"
 echo ""
 echo "Service management:"
 echo "  svc -u /service/$SERVICE_NAME  # Start"
 echo "  svc -d /service/$SERVICE_NAME  # Stop"
 echo "  svc -t /service/$SERVICE_NAME  # Restart"
 echo ""
-
