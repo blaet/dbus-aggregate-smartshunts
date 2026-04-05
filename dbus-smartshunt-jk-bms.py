@@ -144,7 +144,7 @@ class DbusSmartShuntJkBms:
         product_name = config.get('PRODUCT_NAME', 'SmartShunt 500A/50mV')  # Default to common SmartShunt model
         
         # CustomName can be overridden in config, but ProductName should match physical shunt
-        custom_name = config['DEVICE_NAME'] if config['DEVICE_NAME'] else "SmartShunt + JK BMS"
+        custom_name = config['DEVICE_NAME'] if config['DEVICE_NAME'] else "Smartshunt (with JK-BMS voltage)"
         
         self._dbusservice.add_path("/ProductId", product_id,
             gettextcallback=lambda a, x: f"0x{x:X}" if x and isinstance(x, int) else "")

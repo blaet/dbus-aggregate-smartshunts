@@ -126,7 +126,7 @@ def get_list_from_config(group: str, option: str) -> list:
 # Device Configuration
 DEVICE_NAME = config["DEFAULT"].get("DEVICE_NAME", "").strip()
 if not DEVICE_NAME:
-    DEVICE_NAME = "SmartShunt + JK BMS"
+    DEVICE_NAME = "Smartshunt (with JK-BMS voltage)"
 
 # Battery Specifications
 # Capacity is always read from the single SmartShunt configuration registers (no config needed)
@@ -137,7 +137,7 @@ JK_BMS_DBUS_SERVICE = config["DEFAULT"].get("JK_BMS_DBUS_SERVICE", "").strip()
 # Device Naming (second read allows override file to win; re-apply default if empty)
 DEVICE_NAME = config["DEFAULT"].get("DEVICE_NAME", "").strip()
 if not DEVICE_NAME:
-    DEVICE_NAME = "SmartShunt + JK BMS"
+    DEVICE_NAME = "Smartshunt (with JK-BMS voltage)"
 
 # Note: BMS functionality (DEVICE_MODE, MAX_CHARGE_VOLTAGE, MAX_CHARGE_CURRENT, MAX_DISCHARGE_CURRENT) 
 # has been removed from this project. This is now pure monitoring only.
@@ -166,4 +166,3 @@ if errors_in_config:
     logging.error("Please fix the errors in config.ini and restart the program.")
     sleep(60)
     sys.exit(1)
-

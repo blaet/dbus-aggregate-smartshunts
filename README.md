@@ -31,7 +31,7 @@ Use one SmartShunt for accurate coulomb counting and monitoring, but show **cell
 
 ## Git branch
 
-The **SmartShunt + JK BMS** behaviour lives on branch **`flavour/jk-bms-voltage`**. Use that branch for installs and updates (`install.sh` defaults to it). Other branches may carry different product flavours.
+The **Smartshunt (with JK voltage)** flavour lives on branch **`flavour/jk-bms-voltage`**. Use that branch for installs and updates (`install.sh` defaults to it). Other branches may carry different product variants.
 
 ## Migrating from `dbus-aggregate-smartshunts`
 
@@ -96,7 +96,7 @@ That's it! The service will:
 ### Optional Configuration
 
 **No config file is required!** The service runs with sensible defaults:
-- Device name: "SmartShunt + JK BMS" (editable in UI)
+- Device name: "Smartshunt (with JK voltage)" (editable in UI)
 - Temperature thresholds: Configurable via UI switches (see below)
 - SmartShunt selection: Managed via UI switches (see below)
 
