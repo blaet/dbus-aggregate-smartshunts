@@ -168,7 +168,8 @@ class DbusSmartShuntJkBms:
         product_id = config.get('PRODUCT_ID', SMARTSHUNT_PRODUCT_ID)
         product_name = config.get('PRODUCT_NAME', 'SmartShunt 500A/50mV')  # Default to common SmartShunt model
         
-        # CustomName can be overridden in config, but ProductName should match physical shunt
+        # CustomName can be overridden in config. main() pre-resolves a dynamic
+        # default (for example, Lynx Shunt ... (with JK-BMS voltage)).
         custom_name = config['DEVICE_NAME'] if config['DEVICE_NAME'] else "Smartshunt (with JK-BMS voltage)"
         
         self._dbusservice.add_path("/ProductId", product_id,
@@ -1903,9 +1904,21 @@ def main():
         logging.error("  2. Capacity is configured in VictronConnect for that monitor")
         sys.exit(1)
     
+    # Default virtual-device display name:
+    # - if user set DEVICE_NAME in config.ini, keep it
+    # - otherwise derive from the detected monitor type
+    configured_device_name = settings.config["DEFAULT"].get("DEVICE_NAME", "").strip()
+    if configured_device_name:
+        resolved_device_name = configured_device_name
+    else:
+        if first_shunt_product_name and "lynx shunt" in str(first_shunt_product_name).lower():
+            resolved_device_name = f"{first_shunt_product_name} (with JK-BMS voltage)"
+        else:
+            resolved_device_name = "Smartshunt (with JK-BMS voltage)"
+
     # Create config dict
     config = {
-        'DEVICE_NAME': settings.DEVICE_NAME,
+        'DEVICE_NAME': resolved_device_name,
         'TOTAL_CAPACITY': total_capacity,  # Auto-detected
         'FIRMWARE_VERSION': first_shunt_firmware if 'first_shunt_firmware' in locals() and first_shunt_firmware else VERSION,
         'FIRMWARE_VERSION_INT': first_shunt_firmware_int if 'first_shunt_firmware_int' in locals() and first_shunt_firmware_int else None,
@@ -1924,6 +1937,7 @@ def main():
     
     logging.info("========== Settings ==========")
     logging.info("|- Mode: Single SmartShunt (SoC/current/etc.) + JK BMS pack voltage")
+    logging.info(f"|- Virtual device name: {config['DEVICE_NAME']}")
     logging.info(f"|- Total Capacity: {config['TOTAL_CAPACITY']}Ah (from SmartShunt configuration)")
     if config.get("JK_BMS_DBUS_SERVICE"):
         logging.info(f"|- JK BMS D-Bus service (override): {config['JK_BMS_DBUS_SERVICE']}")
