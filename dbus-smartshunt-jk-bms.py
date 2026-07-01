@@ -1912,7 +1912,7 @@ def main():
         resolved_device_name = configured_device_name
     else:
         if first_shunt_product_name and "lynx shunt" in str(first_shunt_product_name).lower():
-            resolved_device_name = f"{first_shunt_product_name} (with JK-BMS voltage)"
+            resolved_device_name = "Lynx Shunt (with JK-BMS voltage)"
         else:
             resolved_device_name = "Smartshunt (with JK-BMS voltage)"
 
