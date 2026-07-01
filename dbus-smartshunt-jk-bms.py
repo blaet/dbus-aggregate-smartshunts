@@ -1180,6 +1180,22 @@ class DbusSmartShuntJkBms:
         Update /Devices/{instance}/* paths to show info about aggregated SmartShunts.
         Uses device instance as the key so paths are stable (e.g., /Devices/278/*, /Devices/277/*).
         """
+        def _device_path_instance(src_instance):
+            """Map physical device instance to a safe /Devices/<n> path index.
+
+            /Devices/0/* is already reserved for this virtual monitor's own
+            identity paths. Some physical devices (e.g. Lynx Shunt on VE.Can)
+            can also report DeviceInstance=0, which would collide.
+
+            Keep all non-zero instances as-is, but remap zero to a high,
+            stable bucket so path registration stays unique.
+            """
+            try:
+                inst = int(src_instance)
+            except (TypeError, ValueError):
+                inst = 0
+            return 1000 if inst == 0 else inst
+
         # Get current device instances
         current_instances = set(shunt['instance'] for shunt in shunts)
         existing_instances = set(self._device_paths.keys())
@@ -1199,13 +1215,17 @@ class DbusSmartShuntJkBms:
         # Add or update paths for current devices
         for shunt in shunts:
             instance = shunt['instance']
+            path_instance = _device_path_instance(instance)
             service = shunt['service']
             
             # Create paths for this device if not already present
             if instance not in self._device_paths:
-                logging.info(f"Creating /Devices/{instance}/* paths for {shunt['name']}")
+                logging.info(
+                    f"Creating /Devices/{path_instance}/* paths for {shunt['name']} "
+                    f"(source instance {instance})"
+                )
                 
-                base_path = f"/Devices/{instance}"
+                base_path = f"/Devices/{path_instance}"
                 paths = [
                     f"{base_path}/CustomName",
                     f"{base_path}/DeviceInstance",
@@ -1233,7 +1253,7 @@ class DbusSmartShuntJkBms:
                 self._device_paths[instance] = paths
             
             # Update values from physical shunt
-            base_path = f"/Devices/{instance}"
+            base_path = f"/Devices/{path_instance}"
             try:
                 fw_version = self._dbusmon.get_value(service, "/FirmwareVersion")
                 product_id = self._dbusmon.get_value(service, "/ProductId")
