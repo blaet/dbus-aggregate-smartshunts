@@ -34,6 +34,9 @@ VERSION = "1.0.0"
 
 # Victron SmartShunt product ID (VE.Direct battery monitor)
 SMARTSHUNT_PRODUCT_ID = 0xA389
+# Product-name fallback(s) for supported shunt monitors. This allows
+# Lynx Shunt devices even when ProductId isn't the SmartShunt VE.Direct ID.
+SUPPORTED_SHUNT_PRODUCT_NAMES = ("smartshunt", "lynx shunt")
 # Our D-Bus battery service (virtual monitor)
 VIRTUAL_BATTERY_SERVICE = "com.victronenergy.battery.smartshunt_jk"
 # Venus settings registration (device list, discovery, shunt toggles)
@@ -68,6 +71,16 @@ VIRTUAL_SERIAL = "SSJK01"
 def get_bus():
     """Return the shared system bus connection (singleton provided by dbus-python)."""
     return dbus.SessionBus() if "DBUS_SESSION_BUS_ADDRESS" in os.environ else dbus.SystemBus()
+
+
+def _is_supported_shunt(product_id, product_name) -> bool:
+    """True for a supported physical shunt source (SmartShunt or Lynx Shunt)."""
+    if product_id == SMARTSHUNT_PRODUCT_ID:
+        return True
+    if product_name:
+        name = str(product_name).lower()
+        return any(marker in name for marker in SUPPORTED_SHUNT_PRODUCT_NAMES)
+    return False
 
 
 class DbusSmartShuntJkBms:
@@ -974,9 +987,9 @@ class DbusSmartShuntJkBms:
                 if is_virtual == 1:
                     continue
                 pid = self._dbusmon.get_value(service, "/ProductId")
-                if pid == SMARTSHUNT_PRODUCT_ID:
-                    continue
                 product_name = self._dbusmon.get_value(service, "/ProductName")
+                if _is_supported_shunt(pid, product_name):
+                    continue
                 if product_name and "jk" in str(product_name).lower():
                     candidates.append(service)
         except Exception as e:
@@ -996,14 +1009,14 @@ class DbusSmartShuntJkBms:
         return False
     
     def _find_smartshunts(self):
-        """Search for exactly one Victron SmartShunt (0xA389) and resolve JK BMS for pack voltage.
+        """Search for exactly one supported shunt monitor and resolve JK BMS for pack voltage.
         
         Note: Discovery controls whether NEW switches are created, not whether we find/aggregate.
         We always search for SmartShunts, but only create switches for new ones when discovery is enabled.
         """
         # Only log at INFO level during initial search or when explicitly looking for new devices
         if not self._shunts:
-            logging.info(f"Searching for SmartShunt + JK BMS: Trial #{self._searchTrials}")
+            logging.info(f"Searching for shunt monitor + JK BMS: Trial #{self._searchTrials}")
         else:
             logging.debug(f"Checking for device changes (interval: {self._device_search_interval}s)")
         
@@ -1022,10 +1035,9 @@ class DbusSmartShuntJkBms:
                     continue
                 
                 product_id = self._dbusmon.get_value(service, "/ProductId")
-                if product_id != SMARTSHUNT_PRODUCT_ID:
-                    continue
-                
                 product_name = self._dbusmon.get_value(service, "/ProductName")
+                if not _is_supported_shunt(product_id, product_name):
+                    continue
                 device_instance = self._dbusmon.get_value(service, "/DeviceInstance")
                 custom_name = self._dbusmon.get_value(service, "/CustomName")
                 
@@ -1033,20 +1045,20 @@ class DbusSmartShuntJkBms:
                     'service': service,
                     'instance': device_instance,
                     'name': custom_name or f"Shunt {device_instance}",
-                    'product': product_name or "SmartShunt",
+                    'product': product_name or "Battery monitor",
                 })
                 if not self._shunts:
-                    logging.info(f"|- SmartShunt: {custom_name} [{device_instance}] - {product_name}")
+                    logging.info(f"|- Shunt monitor: {custom_name} [{device_instance}] - {product_name}")
                 else:
-                    logging.debug(f"|- SmartShunt: {custom_name} [{device_instance}] - {product_name}")
+                    logging.debug(f"|- Shunt monitor: {custom_name} [{device_instance}] - {product_name}")
         
         except Exception as e:
             logging.error(f"Error searching for SmartShunts: {e}")
         
         if len(found_shunts) > 1:
             logging.error(
-                "Expected exactly one Victron SmartShunt (ProductId 0xA389); found %d. "
-                "Remove extra shunts from the bus or disconnect them.",
+                "Expected exactly one supported shunt monitor (SmartShunt or Lynx Shunt); found %d. "
+                "Remove extra shunt monitors from the bus or disconnect them.",
                 len(found_shunts),
             )
             sys.exit(1)
@@ -1076,7 +1088,7 @@ class DbusSmartShuntJkBms:
             if not self._shunts or len(found_shunts) != self._last_device_count:
                 self._shunts = found_shunts
                 self._last_device_count = len(found_shunts)
-                logging.info(f"✓ Found {len(found_shunts)} SmartShunt (pack voltage from JK BMS)")
+                logging.info(f"✓ Found {len(found_shunts)} shunt monitor (pack voltage from JK BMS)")
                 
                 # Create switches for newly discovered shunts
                 for shunt in found_shunts:
@@ -1708,8 +1720,8 @@ def main():
     from dbus.mainloop.glib import DBusGMainLoop
     DBusGMainLoop(set_as_default=True)
     
-    # Auto-detect total capacity from SmartShunt configuration registers
-    logging.info("Reading total capacity from SmartShunt configuration...")
+    # Auto-detect total capacity from the supported shunt monitor configuration
+    logging.info("Reading total capacity from shunt monitor configuration...")
     
     min_charged_voltage = None  # Will be set when reading config
     
@@ -1719,35 +1731,43 @@ def main():
         import dbus
         
         bus = dbus.SystemBus()
-        # Get list of SmartShunt services
+        # Get list of supported shunt monitor services (SmartShunt or Lynx Shunt)
         shunt_services = []
         for service_name in bus.list_names():
             if service_name.startswith('com.victronenergy.battery.'):
-                # Check if it's a SmartShunt (ProductId 0xA389)
                 try:
                     obj = bus.get_object(service_name, '/ProductId')
                     iface = dbus.Interface(obj, 'com.victronenergy.BusItem')
                     product_id = iface.GetValue()
-                    if product_id == SMARTSHUNT_PRODUCT_ID:
-                        # Get product name for logging
-                        try:
-                            obj = bus.get_object(service_name, '/ProductName')
-                            product_name = str(obj.Get('com.victronenergy.BusItem', 'Value', dbus_interface='org.freedesktop.DBus.Properties'))
-                            logging.info(f"|- Found: {product_name}")
-                        except:
-                            logging.info(f"|- Found: {service_name}")
+                    try:
+                        obj = bus.get_object(service_name, '/ProductName')
+                        product_name = str(
+                            obj.Get(
+                                'com.victronenergy.BusItem',
+                                'Value',
+                                dbus_interface='org.freedesktop.DBus.Properties',
+                            )
+                        )
+                    except Exception:
+                        product_name = None
+
+                    if _is_supported_shunt(product_id, product_name):
+                        if product_name:
+                            logging.info(f"|- Found shunt monitor: {product_name}")
+                        else:
+                            logging.info(f"|- Found shunt monitor: {service_name}")
                         shunt_services.append(service_name)
                 except:
                     pass
         
         if len(shunt_services) != 1:
             logging.error(
-                "Expected exactly one Victron SmartShunt (ProductId 0xA389); found %d.",
+                "Expected exactly one supported shunt monitor (SmartShunt or Lynx Shunt); found %d.",
                 len(shunt_services),
             )
-            raise ValueError("Exactly one SmartShunt required")
+            raise ValueError("Exactly one shunt monitor required")
         
-        # Read firmware/hardware/product info from the SmartShunt to mirror it
+        # Read firmware/hardware/product info from the monitor to mirror it
         first_shunt_firmware = None
         first_shunt_firmware_int = None
         first_shunt_hardware = None
@@ -1798,27 +1818,27 @@ def main():
         except Exception as e:
             logging.warning(f"|- Could not read product ID: {e}")
         
-        logging.info("Reading configuration from SmartShunt...")
+        logging.info("Reading configuration from shunt monitor...")
         sole_service = shunt_services[0]
         logging.info(f"  Reading: {sole_service}")
         config_reader = SmartShuntConfig(sole_service)
         if not config_reader.read_all(bus):
             logging.error(f"Failed to read configuration from {sole_service}")
-            raise ValueError("Failed to read SmartShunt configuration")
+            raise ValueError("Failed to read shunt monitor configuration")
         
         config_reader.log_all_settings()
         
         if config_reader.capacity is None:
             logging.error(f"{sole_service}: Could not read capacity from config register!")
-            raise ValueError("Failed to read capacity from SmartShunt")
+            raise ValueError("Failed to read capacity from shunt monitor")
         
         total_capacity = config_reader.capacity
-        logging.info(f"✓ Capacity: {total_capacity}Ah (SmartShunt register 0x1000)")
+        logging.info(f"✓ Capacity: {total_capacity}Ah (monitor register 0x1000)")
         
         if config_reader.charged_voltage is not None:
             min_charged_voltage = config_reader.charged_voltage
         
-        logging.info("SmartShunt configuration summary (single shunt):")
+        logging.info("Shunt monitor configuration summary (single monitor):")
         logging.info("  Note: Pack voltage on the virtual battery is taken from the JK BMS D-Bus service.")
         logging.info("  Note: Battery protection limits (CVL/CCL/DCL) are separate config settings")
                 
@@ -1826,10 +1846,10 @@ def main():
         logging.error(f"Error reading from SmartShunt registers: {e}")
         import traceback
         logging.error(traceback.format_exc())
-        logging.error("\nFailed to read capacity from SmartShunt configuration!")
+        logging.error("\nFailed to read capacity from shunt monitor configuration!")
         logging.error("Please ensure:")
-        logging.error("  1. Exactly one SmartShunt is connected and powered on")
-        logging.error("  2. Capacity is configured in VictronConnect for that SmartShunt")
+        logging.error("  1. Exactly one SmartShunt or Lynx Shunt is connected and powered on")
+        logging.error("  2. Capacity is configured in VictronConnect for that monitor")
         sys.exit(1)
     
     # Create config dict
