@@ -35,8 +35,8 @@ VERSION = "1.0.0"
 # Victron SmartShunt product ID (VE.Direct battery monitor)
 SMARTSHUNT_PRODUCT_ID = 0xA389
 # Product-name fallback(s) for supported shunt monitors. This allows
-# Lynx Shunt devices even when ProductId isn't the SmartShunt VE.Direct ID.
-SUPPORTED_SHUNT_PRODUCT_NAMES = ("smartshunt", "lynx shunt")
+# Lynx-based shunt monitors even when ProductId isn't the SmartShunt VE.Direct ID.
+SUPPORTED_SHUNT_PRODUCT_NAMES = ("smartshunt", "lynx shunt", "lynx")
 # Our D-Bus battery service (virtual monitor)
 VIRTUAL_BATTERY_SERVICE = "com.victronenergy.battery.smartshunt_jk"
 # Venus settings registration (device list, discovery, shunt toggles)
@@ -73,13 +73,25 @@ def get_bus():
     return dbus.SessionBus() if "DBUS_SESSION_BUS_ADDRESS" in os.environ else dbus.SystemBus()
 
 
-def _is_supported_shunt(product_id, product_name) -> bool:
-    """True for a supported physical shunt source (SmartShunt or Lynx Shunt)."""
+def _is_supported_shunt(product_id, product_name, soc=None, consumed_ah=None) -> bool:
+    """True for a supported physical shunt source (SmartShunt/Lynx monitor).
+
+    Primary match:
+    - SmartShunt ProductId (0xA389)
+    - ProductName marker match
+
+    Fallback for some Lynx variants:
+    - Name contains "lynx" and service exposes monitor-like data paths
+      (/Soc or /ConsumedAmphours).
+    """
     if product_id == SMARTSHUNT_PRODUCT_ID:
         return True
     if product_name:
         name = str(product_name).lower()
-        return any(marker in name for marker in SUPPORTED_SHUNT_PRODUCT_NAMES)
+        if any(marker in name for marker in SUPPORTED_SHUNT_PRODUCT_NAMES):
+            return True
+        if "lynx" in name and (soc is not None or consumed_ah is not None):
+            return True
     return False
 
 
@@ -988,7 +1000,9 @@ class DbusSmartShuntJkBms:
                     continue
                 pid = self._dbusmon.get_value(service, "/ProductId")
                 product_name = self._dbusmon.get_value(service, "/ProductName")
-                if _is_supported_shunt(pid, product_name):
+                soc = self._dbusmon.get_value(service, "/Soc")
+                consumed_ah = self._dbusmon.get_value(service, "/ConsumedAmphours")
+                if _is_supported_shunt(pid, product_name, soc, consumed_ah):
                     continue
                 if product_name and "jk" in str(product_name).lower():
                     candidates.append(service)
@@ -1036,7 +1050,16 @@ class DbusSmartShuntJkBms:
                 
                 product_id = self._dbusmon.get_value(service, "/ProductId")
                 product_name = self._dbusmon.get_value(service, "/ProductName")
-                if not _is_supported_shunt(product_id, product_name):
+                soc = self._dbusmon.get_value(service, "/Soc")
+                consumed_ah = self._dbusmon.get_value(service, "/ConsumedAmphours")
+                if not _is_supported_shunt(product_id, product_name, soc, consumed_ah):
+                    if not self._shunts:
+                        logging.debug(
+                            "Ignoring non-monitor battery service: %s (ProductName=%s, ProductId=%s)",
+                            service,
+                            product_name,
+                            product_id,
+                        )
                     continue
                 device_instance = self._dbusmon.get_value(service, "/DeviceInstance")
                 custom_name = self._dbusmon.get_value(service, "/CustomName")
@@ -1731,32 +1754,40 @@ def main():
         import dbus
         
         bus = dbus.SystemBus()
+        def _read_busitem_value(_bus, _service, _path):
+            """Best-effort read of com.victronenergy.BusItem value from service/path."""
+            try:
+                obj = _bus.get_object(_service, _path)
+                iface = dbus.Interface(obj, 'com.victronenergy.BusItem')
+                return iface.GetValue()
+            except Exception:
+                return None
+
         # Get list of supported shunt monitor services (SmartShunt or Lynx Shunt)
         shunt_services = []
         for service_name in bus.list_names():
             if service_name.startswith('com.victronenergy.battery.'):
                 try:
-                    obj = bus.get_object(service_name, '/ProductId')
-                    iface = dbus.Interface(obj, 'com.victronenergy.BusItem')
-                    product_id = iface.GetValue()
-                    try:
-                        obj = bus.get_object(service_name, '/ProductName')
-                        product_name = str(
-                            obj.Get(
-                                'com.victronenergy.BusItem',
-                                'Value',
-                                dbus_interface='org.freedesktop.DBus.Properties',
-                            )
-                        )
-                    except Exception:
-                        product_name = None
+                    product_id = _read_busitem_value(bus, service_name, '/ProductId')
+                    product_name = _read_busitem_value(bus, service_name, '/ProductName')
+                    soc = _read_busitem_value(bus, service_name, '/Soc')
+                    consumed_ah = _read_busitem_value(bus, service_name, '/ConsumedAmphours')
 
-                    if _is_supported_shunt(product_id, product_name):
+                    if _is_supported_shunt(product_id, product_name, soc, consumed_ah):
                         if product_name:
                             logging.info(f"|- Found shunt monitor: {product_name}")
                         else:
                             logging.info(f"|- Found shunt monitor: {service_name}")
                         shunt_services.append(service_name)
+                    else:
+                        logging.debug(
+                            "Ignoring battery service %s (ProductName=%s, ProductId=%s, Soc=%s, ConsumedAh=%s)",
+                            service_name,
+                            product_name,
+                            product_id,
+                            soc,
+                            consumed_ah,
+                        )
                 except:
                     pass
         
